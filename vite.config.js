@@ -7,7 +7,6 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      devOptions: { enabled: true },
       manifest: {
         name: 'Paul Wanjigi Alpine — Records',
         short_name: 'PWA Records',

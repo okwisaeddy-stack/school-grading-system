@@ -72,7 +72,10 @@ function Login({ onSwitchToSignup }) {
   return (
     <div style={wrap}>
       <form onSubmit={handleLogin} style={card}>
-        <h3>Log In</h3>
+        <div style={{ textAlign: 'center', marginBottom: 14 }}>
+          <img src="/crest.png" alt="Crest" style={{ width: 56, height: 56, borderRadius: '50%' }} />
+        </div>
+        <h3 style={{ textAlign: 'center' }}>Log In</h3>
         <input placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} style={input} />
         <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} style={input} />
         {error && <p style={errorText}>{error}</p>}
@@ -150,32 +153,97 @@ function PendingApproval({ fullName, onLogout }) {
 // ============================================================================
 // TOP NAV
 // ============================================================================
+function useIsNarrow() {
+  const [isNarrow, setIsNarrow] = useState(typeof window !== 'undefined' && window.innerWidth < 700)
+  useEffect(() => {
+    function check() { setIsNarrow(window.innerWidth < 700) }
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
+  return isNarrow
+}
+
 function TopBar({ tab, setTab, onLogout, fullName }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Teachers', 'Approvals']
+  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Teachers', 'My Teaching', 'Approvals']
+  const isNarrow = useIsNarrow()
+  const [menuOpen, setMenuOpen] = useState(false)
+
   return (
     <div style={{ background: COLORS.band, color: COLORS.bandText, fontFamily: 'sans-serif' }}>
       <div style={{ maxWidth: 980, margin: '0 auto', padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontWeight: 700, fontSize: 16 }}>Paul Wanjigi Alpine — Records</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {isNarrow && (
+            <button
+              onClick={() => setMenuOpen(true)}
+              aria-label="Open menu"
+              style={{ background: 'none', border: 'none', color: COLORS.bandText, fontSize: 22, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+            >
+              ☰
+            </button>
+          )}
+          <img src="/crest.png" alt="Crest" style={{ width: isNarrow ? 26 : 32, height: isNarrow ? 26 : 32, borderRadius: '50%', flexShrink: 0 }} />
+          <div style={{ fontWeight: 700, fontSize: isNarrow ? 14 : 16 }}>
+            {isNarrow ? 'PWA Records' : 'Paul Wanjigi Alpine — Records'}
+          </div>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <span style={{ fontSize: 12 }}>{fullName}</span>
-          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)' }}>Log out</button>
+          {!isNarrow && <span style={{ fontSize: 12 }}>{fullName}</span>}
+          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
+            Log out
+          </button>
         </div>
       </div>
-      <div style={{ maxWidth: 980, margin: '0 auto', padding: '0 12px', display: 'flex', gap: 4, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-        {tabs.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
+
+      {!isNarrow && (
+        <div style={{ maxWidth: 980, margin: '0 auto', padding: '0 12px', display: 'flex', gap: 4, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          {tabs.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              style={{
+                padding: '10px 16px', background: tab === t ? COLORS.paper : 'transparent',
+                color: tab === t ? COLORS.ink : COLORS.bandText, border: 'none',
+                borderTopLeftRadius: 6, borderTopRightRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+              }}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {isNarrow && menuOpen && (
+        <div
+          onClick={() => setMenuOpen(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
             style={{
-              padding: '10px 16px', background: tab === t ? COLORS.paper : 'transparent',
-              color: tab === t ? COLORS.ink : COLORS.bandText, border: 'none',
-              borderTopLeftRadius: 6, borderTopRightRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+              position: 'absolute', top: 0, left: 0, bottom: 0, width: '72vw', maxWidth: 280,
+              background: COLORS.paper, boxShadow: '2px 0 12px rgba(0,0,0,0.2)',
+              display: 'flex', flexDirection: 'column', padding: '18px 0',
             }}
           >
-            {t}
-          </button>
-        ))}
-      </div>
+            <div style={{ padding: '0 20px 14px', borderBottom: `1px solid ${COLORS.ruleLight}`, marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, color: COLORS.ink }}>{fullName}</div>
+              <div style={{ fontSize: 11, color: COLORS.muted }}>Paul Wanjigi Alpine — Records</div>
+            </div>
+            {tabs.map((t) => (
+              <button
+                key={t}
+                onClick={() => { setTab(t); setMenuOpen(false) }}
+                style={{
+                  textAlign: 'left', padding: '14px 20px', background: tab === t ? COLORS.accentSoft : 'transparent',
+                  color: COLORS.ink, border: 'none', fontSize: 14, fontWeight: tab === t ? 700 : 500, cursor: 'pointer',
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -777,6 +845,7 @@ function StudentsScreen() {
   const [showImport, setShowImport] = useState(false)
   const [editingStudent, setEditingStudent] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
+  const isNarrow = useIsNarrow()
 
   useEffect(() => {
     loadStudents()
@@ -800,7 +869,7 @@ function StudentsScreen() {
 
   return (
     <div style={pageWrap}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <h2>Students</h2>
           <p style={{ color: COLORS.muted, fontSize: 13, margin: 0 }}>{students.length} students in the system.</p>
@@ -811,7 +880,36 @@ function StudentsScreen() {
         </div>
       </div>
 
-      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
+        // ---- Card layout for phones: no horizontal scrolling needed ----
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {students.map((s) => (
+            <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{s.full_name}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 12.5, marginBottom: 10 }}>
+                <div><span style={{ color: COLORS.muted }}>Adm. No.</span><br/>{s.admission_no}</div>
+                <div><span style={{ color: COLORS.muted }}>Cohort</span><br/>{s.cohort}{s.pathway ? ` · ${s.pathway}` : ''}</div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <span style={{ color: COLORS.muted }}>Entrance</span><br/>
+                  {s.entrance_type ? `${s.entrance_score}/${s.entrance_max}` : '—'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 16, borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 8 }}>
+                <button onClick={() => setEditingStudent(s)} style={{ fontSize: 12.5, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>Edit</button>
+                <button onClick={() => handleDelete(s.id)} disabled={deletingId === s.id} style={{ fontSize: 12.5, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
+                  {deletingId === s.id ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          ))}
+          {students.length === 0 && (
+            <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+              No students yet.
+            </div>
+          )}
+        </div>
+      ) : (
+        // ---- Table layout for desktop ----
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
           <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
             <thead><tr><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={th}>Cohort</th><th style={th}>Entrance</th><th style={th}></th></tr></thead>
@@ -1039,7 +1137,7 @@ function TeacherOnboarding({ teacherId, onDone }) {
 // ============================================================================
 // TEACHER: Marks Entry
 // ============================================================================
-function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
+function MarksEntryContent({ teacherId }) {
   const [showManage, setShowManage] = useState(false)
   const [myAssignments, setMyAssignments] = useState([])
   const [selectedAssignment, setSelectedAssignment] = useState('')
@@ -1052,8 +1150,9 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
+  const isNarrow = useIsNarrow()
 
-  useEffect(() => { loadAssignmentsAndExams() }, [])
+  useEffect(() => { loadAssignmentsAndExams() }, [teacherId])
   useEffect(() => { if (selectedAssignment && selectedExamId) loadStudentsAndMarks() }, [selectedAssignment, selectedExamId])
 
   async function loadAssignmentsAndExams() {
@@ -1130,95 +1229,131 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const enteredCount = students.filter((s) => marksByStudent[s.id] || drafts[s.id] !== undefined).length
 
   return (
-    <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
-      <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between' }}>
-        <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
-        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
-          <span style={{ fontSize: 12 }}>{teacherName}</span>
-          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)' }}>Log out</button>
-        </div>
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+        <h2>Marks Entry</h2>
+        <button onClick={() => setShowManage(true)} style={secondaryBtn}>+ Add another subject/class</button>
       </div>
 
-      <div style={pageWrap}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-          <h2>Marks Entry</h2>
-          <button onClick={() => setShowManage(true)} style={secondaryBtn}>+ Add another subject/class</button>
-        </div>
-
-        {myAssignments.length === 0 ? (
-          <p style={{ color: COLORS.muted }}>No subjects assigned yet.</p>
-        ) : (
-          <>
-            <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
-              <label style={fieldLabel}>Subject / Class
-                <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={{ ...input, minWidth: 220 }}>
-                  {myAssignments.map((a) => (
-                    <option key={a.id} value={a.id}>{a.subjects?.name} — {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={fieldLabel}>Exam
-                <select value={selectedExamId} onChange={(e) => setSelectedExamId(e.target.value)} style={{ ...input, minWidth: 220 }}>
-                  {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
-                </select>
-              </label>
-              <div style={{ marginLeft: 'auto', fontSize: 12, color: COLORS.muted, alignSelf: 'flex-end', paddingBottom: 10 }}>
-                {enteredCount} / {students.length} entered
-              </div>
+      {myAssignments.length === 0 ? (
+        <p style={{ color: COLORS.muted }}>No subjects assigned yet.</p>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
+            <label style={fieldLabel}>Subject / Class
+              <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={{ ...input, minWidth: 220 }}>
+                {myAssignments.map((a) => (
+                  <option key={a.id} value={a.id}>{a.subjects?.name} — {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label}</option>
+                ))}
+              </select>
+            </label>
+            <label style={fieldLabel}>Exam
+              <select value={selectedExamId} onChange={(e) => setSelectedExamId(e.target.value)} style={{ ...input, minWidth: 220 }}>
+                {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
+              </select>
+            </label>
+            <div style={{ marginLeft: 'auto', fontSize: 12, color: COLORS.muted, alignSelf: 'flex-end', paddingBottom: 10 }}>
+              {enteredCount} / {students.length} entered
             </div>
+          </div>
 
-            {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
-              <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
-                <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-                  <thead><tr><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={{ ...th, textAlign: 'center' }}>Score</th><th style={th}>Remark</th><th style={{ ...th, textAlign: 'center' }}>Status</th></tr></thead>
-                  <tbody>
-                    {students.map((s) => {
-                      const existing = marksByStudent[s.id]
-                      const draft = drafts[s.id]
-                      const hasValue = draft !== undefined ? draft !== '' : !!existing
-                      return (
-                        <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
-                          <td style={td}>{s.full_name}</td>
-                          <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
-                          <td style={{ ...td, textAlign: 'center' }}>
-                            <input
-                              type="number" min={0} max={100}
-                              defaultValue={existing ? existing.score : ''}
-                              onChange={(e) => updateDraft(s.id, e.target.value)}
-                              style={{ width: 64, padding: '6px 8px', textAlign: 'center', border: `1px solid ${COLORS.rule}`, borderRadius: 4 }}
-                            />
-                          </td>
-                          <td style={td}>
-                            <input
-                              type="text" placeholder="Optional remark…"
-                              defaultValue={existing ? existing.remark || '' : ''}
-                              onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
-                              style={{ width: '100%', minWidth: 140, padding: '6px 8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
-                            />
-                          </td>
-                          <td style={{ ...td, textAlign: 'center' }}>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: hasValue ? COLORS.good : COLORS.warn }}>
-                              {hasValue ? '● Entered' : '○ Pending'}
-                            </span>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                    {students.length === 0 && (
-                      <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students in this class yet.</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
-              <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg || 'Unsaved changes are only committed once you save.'}</span>
-              <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
+          {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
+            // ---- Card layout for phones ----
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {students.map((s) => {
+                const existing = marksByStudent[s.id]
+                const draft = drafts[s.id]
+                const hasValue = draft !== undefined ? draft !== '' : !!existing
+                return (
+                  <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 14 }}>{s.full_name}</div>
+                        <div style={{ fontSize: 11.5, color: COLORS.muted }}>{s.admission_no}</div>
+                      </div>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: hasValue ? COLORS.good : COLORS.warn, whiteSpace: 'nowrap' }}>
+                        {hasValue ? '● Entered' : '○ Pending'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                      <label style={{ ...fieldLabel, flex: '0 0 80px' }}>Score
+                        <input
+                          type="number" min={0} max={100}
+                          defaultValue={existing ? existing.score : ''}
+                          onChange={(e) => updateDraft(s.id, e.target.value)}
+                          style={{ width: '100%', padding: '8px', textAlign: 'center', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
+                        />
+                      </label>
+                      <label style={{ ...fieldLabel, flex: 1 }}>Remark
+                        <input
+                          type="text" placeholder="Optional…"
+                          defaultValue={existing ? existing.remark || '' : ''}
+                          onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
+                          style={{ width: '100%', padding: '8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )
+              })}
+              {students.length === 0 && (
+                <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+                  No students in this class yet.
+                </div>
+              )}
             </div>
-          </>
-        )}
-      </div>
+          ) : (
+            // ---- Table layout for desktop ----
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+              <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
+                <thead><tr><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={{ ...th, textAlign: 'center' }}>Score</th><th style={th}>Remark</th><th style={{ ...th, textAlign: 'center' }}>Status</th></tr></thead>
+                <tbody>
+                  {students.map((s) => {
+                    const existing = marksByStudent[s.id]
+                    const draft = drafts[s.id]
+                    const hasValue = draft !== undefined ? draft !== '' : !!existing
+                    return (
+                      <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                        <td style={td}>{s.full_name}</td>
+                        <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          <input
+                            type="number" min={0} max={100}
+                            defaultValue={existing ? existing.score : ''}
+                            onChange={(e) => updateDraft(s.id, e.target.value)}
+                            style={{ width: 64, padding: '6px 8px', textAlign: 'center', border: `1px solid ${COLORS.rule}`, borderRadius: 4 }}
+                          />
+                        </td>
+                        <td style={td}>
+                          <input
+                            type="text" placeholder="Optional remark…"
+                            defaultValue={existing ? existing.remark || '' : ''}
+                            onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
+                            style={{ width: '100%', minWidth: 140, padding: '6px 8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
+                          />
+                        </td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: hasValue ? COLORS.good : COLORS.warn }}>
+                            {hasValue ? '● Entered' : '○ Pending'}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {students.length === 0 && (
+                    <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students in this class yet.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+            <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg || 'Unsaved changes are only committed once you save.'}</span>
+            <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
+          </div>
+        </>
+      )}
       {showManage && (
         <AddAssignmentModal
           teacherId={teacherId}
@@ -1226,6 +1361,45 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
           onAdded={() => { setShowManage(false); loadAssignmentsAndExams() }}
         />
       )}
+    </>
+  )
+}
+
+// ============================================================================
+// TEACHER: Full-page Marks Entry (own header + logout) — used when logged in
+// as an approved teacher, not an admin
+// ============================================================================
+function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
+  return (
+    <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
+      <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src="/crest.png" alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
+          <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
+        </div>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+          <span style={{ fontSize: 12 }}>{teacherName}</span>
+          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)' }}>Log out</button>
+        </div>
+      </div>
+      <div style={pageWrap}>
+        <MarksEntryContent teacherId={teacherId} />
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// ADMIN: "My Teaching" — lets an admin who also teaches a subject enter
+// their own marks, using the exact same logic as regular teachers
+// ============================================================================
+function AdminTeachingScreen({ profile }) {
+  return (
+    <div style={pageWrap}>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 4 }}>
+        If you also teach a subject, assign it here and enter marks the same way any teacher would.
+      </p>
+      <MarksEntryContent teacherId={profile.id} />
     </div>
   )
 }
@@ -2085,6 +2259,7 @@ export default function App() {
           {tab === 'Exams' && <ExamsScreen />}
           {tab === 'Reports' && <ReportsScreen />}
           {tab === 'Teachers' && <TeachersScreen />}
+          {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
           {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
         </div>
       )
