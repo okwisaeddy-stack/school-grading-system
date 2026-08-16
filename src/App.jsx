@@ -2443,6 +2443,63 @@ function TeachersScreen() {
 // ADMIN: Performance Track — full class ranking list + most improved,
 // separate from individual report cards
 // ============================================================================
+function buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings) {
+  const improvedRows = mostImproved.map((m, i) => `
+    <tr style="border-top:1px solid #E4DFD1;">
+      <td style="padding:6px 10px;">${i + 1}</td>
+      <td style="padding:6px 10px;">${m.student.full_name}</td>
+      <td style="padding:6px 10px;color:#6B6558;">${m.student.admission_no}</td>
+      <td style="padding:6px 10px;">${m.previousRank} → <strong>${m.currentRank}</strong></td>
+      <td style="padding:6px 10px;color:#3E6B4F;font-weight:700;">▲ ${m.change}</td>
+    </tr>`).join('')
+
+  const rankingRows = rankings.map((r) => `
+    <tr style="border-top:1px solid #E4DFD1;">
+      <td style="padding:6px 10px;font-weight:700;">${r.rnk}</td>
+      <td style="padding:6px 10px;">${r.student.full_name}</td>
+      <td style="padding:6px 10px;color:#6B6558;">${r.student.admission_no}</td>
+      <td style="padding:6px 10px;">${r.total_points} / ${r.max_points}</td>
+    </tr>`).join('')
+
+  return `
+    <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;padding:20px;">
+      <div style="border-bottom:2px solid #2C3E37;padding-bottom:10px;margin-bottom:16px;">
+        <div style="font-size:18px;font-weight:800;color:#2C3E37;">Performance Track — ${cohortLabel}</div>
+        <div style="font-size:12px;color:#6B6558;">${examLabel}</div>
+      </div>
+
+      ${mostImproved.length > 0 ? `
+      <div style="font-size:13px;font-weight:700;color:#9C6B2E;margin-bottom:6px;">🏆 Most Improved</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:20px;">
+        <thead><tr style="background:#F7F5EF;"><th style="text-align:left;padding:6px 10px;">#</th><th style="text-align:left;padding:6px 10px;">Student</th><th style="text-align:left;padding:6px 10px;">Adm No.</th><th style="text-align:left;padding:6px 10px;">Rank Change</th><th style="text-align:left;padding:6px 10px;">Δ</th></tr></thead>
+        <tbody>${improvedRows}</tbody>
+      </table>` : ''}
+
+      <div style="font-size:13px;font-weight:700;color:#2C3E37;margin-bottom:6px;">Full Class Ranking</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+        <thead><tr style="background:#2C3E37;color:#F4F1E8;"><th style="text-align:left;padding:6px 10px;">Position</th><th style="text-align:left;padding:6px 10px;">Student</th><th style="text-align:left;padding:6px 10px;">Adm No.</th><th style="text-align:left;padding:6px 10px;">Total Points</th></tr></thead>
+        <tbody>${rankingRows}</tbody>
+      </table>
+    </div>
+  `
+}
+
+function buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings) {
+  const lines = [`Performance Track — ${cohortLabel}`, examLabel, '']
+  if (mostImproved.length > 0) {
+    lines.push('🏆 Most Improved:')
+    mostImproved.slice(0, 5).forEach((m, i) => {
+      lines.push(`${i + 1}. ${m.student.full_name} — ${m.previousRank}→${m.currentRank} (▲${m.change})`)
+    })
+    lines.push('')
+  }
+  lines.push('Top of Class Ranking:')
+  rankings.slice(0, 10).forEach((r) => {
+    lines.push(`${r.rnk}. ${r.student.full_name} — ${r.total_points}/${r.max_points}`)
+  })
+  return lines.join('\n')
+}
+
 function PerformanceTrackScreen() {
   const [cohort, setCohort] = useState('form_4')
   const [exams, setExams] = useState([])
@@ -2515,6 +2572,55 @@ function PerformanceTrackScreen() {
     { value: 'form_4', label: 'Form 4' },
     { value: 'grade_10', label: 'Grade 10' },
   ]
+  const cohortLabel = cohortOptions.find((c) => c.value === cohort)?.label || cohort
+  const currentExam = exams.find((e) => e.id === selectedExamId)
+  const examLabel = currentExam ? `${currentExam.name} — ${currentExam.term} ${currentExam.year}` : ''
+
+  async function downloadPdf() {
+    const container = document.createElement('div')
+    container.style.position = 'fixed'
+    container.style.left = '-9999px'
+    container.style.background = '#fff'
+    container.style.width = '800px'
+    container.innerHTML = buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings)
+    document.body.appendChild(container)
+    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff' })
+    document.body.removeChild(container)
+    const imgData = canvas.toDataURL('image/png')
+    const pdf = new jsPDF('p', 'mm', 'a4')
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const imgWidth = pageWidth - 20
+    const imgHeight = (canvas.height * imgWidth) / canvas.width
+    pdf.addImage(imgData, 'PNG', 10, 10, imgWidth, imgHeight)
+    pdf.save(`${cohortLabel.replace(/\s+/g, '_')}_${examLabel.replace(/[^\w]+/g, '_')}_Performance_Track.pdf`)
+  }
+
+  function printTrack() {
+    const container = document.createElement('div')
+    container.id = 'print-pt-container'
+    container.innerHTML = buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings)
+    const style = document.createElement('style')
+    style.id = 'print-pt-style'
+    style.innerHTML = `
+      @media print {
+        body > *:not(#print-pt-container) { display: none !important; }
+        #print-pt-container { display: block !important; }
+      }
+      @media screen { #print-pt-container { display: none; } }
+    `
+    document.head.appendChild(style)
+    document.body.appendChild(container)
+    window.print()
+    const cleanup = () => {
+      document.body.removeChild(container)
+      document.head.removeChild(style)
+      window.removeEventListener('afterprint', cleanup)
+    }
+    window.addEventListener('afterprint', cleanup)
+  }
+
+  const whatsAppText = buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings)
+  const whatsAppShareLink = `https://wa.me/?text=${encodeURIComponent(whatsAppText)}`
 
   return (
     <div style={pageWrap}>
@@ -2534,6 +2640,13 @@ function PerformanceTrackScreen() {
             {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
           </select>
         </label>
+        <div style={{ display: 'flex', gap: 8, alignSelf: 'flex-end', marginBottom: 10 }}>
+          <a href={whatsAppShareLink} target="_blank" rel="noreferrer" style={{ ...secondaryBtn, textDecoration: 'none', display: 'inline-block' }}>
+            💬 Share via WhatsApp
+          </a>
+          <button onClick={printTrack} style={secondaryBtn}>🖨 Print</button>
+          <button onClick={downloadPdf} style={btn}>⬇ Download PDF</button>
+        </div>
       </div>
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
