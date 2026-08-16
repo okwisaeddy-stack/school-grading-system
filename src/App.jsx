@@ -153,6 +153,60 @@ function PendingApproval({ fullName, onLogout }) {
 // ============================================================================
 // TOP NAV
 // ============================================================================
+// ============================================================================
+// SHARED: Change Password modal (for any logged-in user — admin or teacher)
+// ============================================================================
+function ChangePasswordModal({ onClose }) {
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+
+  async function handleSave() {
+    setError('')
+    if (newPassword.length < 6) { setError('Password must be at least 6 characters.'); return }
+    if (newPassword !== confirmPassword) { setError("Passwords don't match."); return }
+    setSaving(true)
+    const { error } = await supabase.auth.updateUser({ password: newPassword })
+    if (error) { setError(error.message); setSaving(false); return }
+    setSaving(false)
+    setSuccess(true)
+  }
+
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(360px, 94vw)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3>Change Password</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+
+        {success ? (
+          <>
+            <p style={{ fontSize: 13, color: COLORS.good, marginBottom: 16 }}>✓ Password changed successfully.</p>
+            <button onClick={onClose} style={{ ...btn, width: '100%' }}>Done</button>
+          </>
+        ) : (
+          <>
+            <label style={fieldLabel}>New password
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} style={input} placeholder="At least 6 characters" />
+            </label>
+            <label style={fieldLabel}>Confirm new password
+              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} style={input} />
+            </label>
+            {error && <p style={errorText}>{error}</p>}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+              <button onClick={onClose} style={secondaryBtn}>Cancel</button>
+              <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save Password'}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function useIsNarrow() {
   const [isNarrow, setIsNarrow] = useState(typeof window !== 'undefined' && window.innerWidth < 700)
   useEffect(() => {
@@ -167,6 +221,7 @@ function TopBar({ tab, setTab, onLogout, fullName }) {
   const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Teachers', 'My Teaching', 'Approvals']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [showChangePw, setShowChangePw] = useState(false)
 
   return (
     <div style={{ background: COLORS.band, color: COLORS.bandText, fontFamily: 'sans-serif' }}>
@@ -186,8 +241,11 @@ function TopBar({ tab, setTab, onLogout, fullName }) {
             {isNarrow ? 'PWA Records' : 'Paul Wanjigi Alpine — Records'}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isNarrow ? 8 : 14 }}>
           {!isNarrow && <span style={{ fontSize: 12 }}>{fullName}</span>}
+          <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
+            {isNarrow ? '🔑' : 'Change Password'}
+          </button>
           <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
             Log out
           </button>
@@ -244,6 +302,7 @@ function TopBar({ tab, setTab, onLogout, fullName }) {
           </div>
         </div>
       )}
+      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
   )
 }
@@ -989,12 +1048,17 @@ function ExamsScreen() {
     loadExams()
   }
 
+  const isNarrow = useIsNarrow()
+
   return (
     <div style={pageWrap}>
       <h2>Exams</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>Create a new exam whenever one happens — no fixed schedule required.</p>
 
-      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 18, marginBottom: 24, display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+      <div style={{
+        background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 18, marginBottom: 24,
+        display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, alignItems: isNarrow ? 'stretch' : 'flex-end', flexWrap: 'wrap',
+      }}>
         <label style={fieldLabel}>Exam name
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Term 2 Opener" style={input} />
         </label>
@@ -1009,10 +1073,45 @@ function ExamsScreen() {
         <label style={fieldLabel}>Term resumes on (optional)
           <input type="date" value={resumeDate} onChange={(e) => setResumeDate(e.target.value)} style={input} />
         </label>
-        <button onClick={createExam} disabled={saving} style={btn}>{saving ? 'Creating...' : '+ Create Exam'}</button>
+        <button onClick={createExam} disabled={saving} style={{ ...btn, width: isNarrow ? '100%' : 'auto' }}>{saving ? 'Creating...' : '+ Create Exam'}</button>
       </div>
 
-      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
+        // ---- Card layout for phones ----
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {exams.map((e) => (
+            <div key={e.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{e.name}</div>
+                <div style={{ fontSize: 11, color: COLORS.muted }}>#{e.order_index}</div>
+              </div>
+              <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 8 }}>{e.term} {e.year}</div>
+              <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 8, fontSize: 12.5 }}>
+                <span style={{ color: COLORS.muted }}>Term Resumes: </span>
+                {editingResumeId === e.id ? (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                    <input type="date" value={editingResumeValue} onChange={(ev) => setEditingResumeValue(ev.target.value)} style={{ ...input, marginBottom: 0, flex: 1 }} />
+                    <button onClick={() => saveResumeDate(e.id)} style={{ ...secondaryBtn, padding: '6px 12px' }}>Save</button>
+                  </div>
+                ) : (
+                  <span
+                    onClick={() => { setEditingResumeId(e.id); setEditingResumeValue(e.term_resumes_on || '') }}
+                    style={{ cursor: 'pointer', color: e.term_resumes_on ? COLORS.ink : COLORS.accent, fontWeight: 600 }}
+                  >
+                    {e.term_resumes_on ? new Date(e.term_resumes_on).toLocaleDateString('en-GB') : 'Set date →'}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+          {exams.length === 0 && (
+            <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+              No exams yet.
+            </div>
+          )}
+        </div>
+      ) : (
+        // ---- Table layout for desktop ----
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
           <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
             <thead><tr><th style={th}>#</th><th style={th}>Exam</th><th style={th}>Term</th><th style={th}>Year</th><th style={th}>Term Resumes</th></tr></thead>
@@ -1370,6 +1469,7 @@ function MarksEntryContent({ teacherId }) {
 // as an approved teacher, not an admin
 // ============================================================================
 function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
+  const [showChangePw, setShowChangePw] = useState(false)
   return (
     <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
       <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1377,14 +1477,16 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
           <img src="/crest.png" alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
           <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
         </div>
-        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <span style={{ fontSize: 12 }}>{teacherName}</span>
+          <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', fontSize: 12 }}>Change Password</button>
           <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)' }}>Log out</button>
         </div>
       </div>
       <div style={pageWrap}>
         <MarksEntryContent teacherId={teacherId} />
       </div>
+      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
   )
 }
