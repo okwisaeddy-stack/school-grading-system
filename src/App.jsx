@@ -92,6 +92,7 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
   const [fullName, setFullName] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [roleChoice, setRoleChoice] = useState('teacher') // 'teacher' | 'Principal' | 'Deputy Principal' | 'Dean of Studies'
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -103,11 +104,14 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
     const email = usernameToEmail(username)
     const { data, error } = await supabase.auth.signUp({ email, password })
     if (error) { setError(error.message); setLoading(false); return }
+
+    const isLeadership = roleChoice !== 'teacher'
     const { error: profileError } = await supabase.from('profiles').insert({
       id: data.user.id,
       username: username.trim().toLowerCase(),
       full_name: fullName.trim(),
-      role: 'teacher',
+      role: isLeadership ? 'admin' : 'teacher',
+      title: isLeadership ? roleChoice : null,
       status: 'pending',
     })
     if (profileError) { setError(profileError.message); setLoading(false); return }
@@ -120,11 +124,24 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
       <form onSubmit={handleSignup} style={card}>
         <h3>Create your account</h3>
         <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-          Use your real name so the Dean of Studies can confirm you're on staff.
+          Use your real name so an existing admin can confirm you're on staff.
         </p>
         <input placeholder="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} style={input} />
         <input placeholder="Choose a username" value={username} onChange={(e) => setUsername(e.target.value)} style={input} />
         <input type="password" placeholder="Choose a password" value={password} onChange={(e) => setPassword(e.target.value)} style={input} />
+        <label style={fieldLabel}>Your role
+          <select value={roleChoice} onChange={(e) => setRoleChoice(e.target.value)} style={input}>
+            <option value="teacher">Subject Teacher</option>
+            <option value="Principal">Principal</option>
+            <option value="Deputy Principal">Deputy Principal</option>
+            <option value="Dean of Studies">Dean of Studies</option>
+          </select>
+        </label>
+        {roleChoice !== 'teacher' && (
+          <p style={{ fontSize: 11.5, color: COLORS.accent, marginTop: -4, marginBottom: 10 }}>
+            Leadership roles get full admin access once approved — an existing admin will confirm this is genuinely you before it's granted.
+          </p>
+        )}
         {error && <p style={errorText}>{error}</p>}
         <button type="submit" disabled={loading} style={{ ...btn, width: '100%' }}>{loading ? 'Creating...' : 'Create Account'}</button>
         <p style={{ fontSize: 12, textAlign: 'center', marginTop: 14 }}>
@@ -217,7 +234,7 @@ function useIsNarrow() {
   return isNarrow
 }
 
-function TopBar({ tab, setTab, onLogout, fullName }) {
+function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Teachers', 'My Teaching', 'Approvals']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -242,7 +259,7 @@ function TopBar({ tab, setTab, onLogout, fullName }) {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: isNarrow ? 8 : 14 }}>
-          {!isNarrow && <span style={{ fontSize: 12 }}>{fullName}</span>}
+          {!isNarrow && <span style={{ fontSize: 12 }}>{fullName}{title ? ` · ${title}` : ''}</span>}
           <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
             {isNarrow ? '🔑' : 'Change Password'}
           </button>
@@ -285,7 +302,7 @@ function TopBar({ tab, setTab, onLogout, fullName }) {
           >
             <div style={{ padding: '0 20px 14px', borderBottom: `1px solid ${COLORS.ruleLight}`, marginBottom: 8 }}>
               <div style={{ fontWeight: 700, fontSize: 15, color: COLORS.ink }}>{fullName}</div>
-              <div style={{ fontSize: 11, color: COLORS.muted }}>Paul Wanjigi Alpine — Records</div>
+              <div style={{ fontSize: 11, color: COLORS.muted }}>{title || 'Paul Wanjigi Alpine — Records'}</div>
             </div>
             {tabs.map((t) => (
               <button
@@ -373,7 +390,7 @@ function ApprovalsScreen({ currentUserId }) {
   async function loadPending() {
     setLoading(true)
     const { data, error } = await supabase
-      .from('profiles').select('*').eq('role', 'teacher').eq('status', 'pending')
+      .from('profiles').select('*').eq('status', 'pending')
       .order('created_at', { ascending: true })
     if (!error) setPending(data)
     setLoading(false)
@@ -395,8 +412,8 @@ function ApprovalsScreen({ currentUserId }) {
 
   return (
     <div style={pageWrap}>
-      <h2>Pending Teacher Approvals</h2>
-      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>Confirm each name is actually on staff before approving.</p>
+      <h2>Pending Approvals</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>Confirm each name is actually on staff before approving — leadership requests grant full admin access.</p>
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : pending.length === 0 ? (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 24, textAlign: 'center', color: COLORS.muted, fontSize: 13 }}>
@@ -405,12 +422,19 @@ function ApprovalsScreen({ currentUserId }) {
       ) : (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
           <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-            <thead><tr><th style={th}>Full Name</th><th style={th}>Username</th><th style={th}>Signed up</th><th style={th}></th></tr></thead>
+            <thead><tr><th style={th}>Full Name</th><th style={th}>Username</th><th style={th}>Requested Role</th><th style={th}>Signed up</th><th style={th}></th></tr></thead>
             <tbody>
               {pending.map((p) => (
                 <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                   <td style={td}>{p.full_name}</td>
                   <td style={{ ...td, color: COLORS.muted }}>{p.username}</td>
+                  <td style={td}>
+                    {p.role === 'admin' ? (
+                      <span style={{ color: COLORS.accent, fontWeight: 700 }}>{p.title || 'Admin'}</span>
+                    ) : (
+                      'Subject Teacher'
+                    )}
+                  </td>
                   <td style={{ ...td, color: COLORS.muted }}>{new Date(p.created_at).toLocaleDateString()}</td>
                   <td style={{ ...td, textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -1018,6 +1042,14 @@ function ExamsScreen() {
   const [editingResumeId, setEditingResumeId] = useState(null)
   const [editingResumeValue, setEditingResumeValue] = useState('')
 
+  // Officials (Principal/Manager names + signatures) for the new exam
+  const [officialsMode, setOfficialsMode] = useState('same') // 'same' | 'new'
+  const [principalName, setPrincipalName] = useState('')
+  const [managerName, setManagerName] = useState('')
+  const [principalSigFile, setPrincipalSigFile] = useState(null)
+  const [managerSigFile, setManagerSigFile] = useState(null)
+  const [editingOfficialsId, setEditingOfficialsId] = useState(null)
+
   useEffect(() => { loadExams() }, [])
 
   async function loadExams() {
@@ -1027,17 +1059,58 @@ function ExamsScreen() {
     setLoading(false)
   }
 
+  const previousExam = exams.length > 0 ? exams[exams.length - 1] : null
+  const hasPreviousOfficials = previousExam && (previousExam.principal_name || previousExam.manager_name)
+
+  async function uploadSignature(file, label) {
+    if (!file) return null
+    const ext = file.name.split('.').pop()
+    const path = `${label}-${Date.now()}.${ext}`
+    const { error } = await supabase.storage.from('signatures').upload(path, file)
+    if (error) return null
+    const { data } = supabase.storage.from('signatures').getPublicUrl(path)
+    return data.publicUrl
+  }
+
   async function createExam() {
     if (!name.trim()) return
     setSaving(true)
     const nextOrder = exams.length > 0 ? Math.max(...exams.map((e) => e.order_index)) + 1 : 1
     const { data: { user } } = await supabase.auth.getUser()
+
+    let officials = {}
+    if (officialsMode === 'same' && previousExam) {
+      officials = {
+        principal_name: previousExam.principal_name,
+        manager_name: previousExam.manager_name,
+        principal_signature_url: previousExam.principal_signature_url,
+        manager_signature_url: previousExam.manager_signature_url,
+      }
+    } else {
+      const [pUrl, mUrl] = await Promise.all([
+        uploadSignature(principalSigFile, 'principal'),
+        uploadSignature(managerSigFile, 'manager'),
+      ])
+      officials = {
+        principal_name: principalName.trim() || null,
+        manager_name: managerName.trim() || null,
+        principal_signature_url: pUrl,
+        manager_signature_url: mUrl,
+      }
+    }
+
     await supabase.from('exams').insert({
       name: name.trim(), term, year, order_index: nextOrder, created_by: user.id,
       term_resumes_on: resumeDate || null,
+      ...officials,
     })
     setName('')
     setResumeDate('')
+    setPrincipalName('')
+    setManagerName('')
+    setPrincipalSigFile(null)
+    setManagerSigFile(null)
+    setOfficialsMode('same')
     setSaving(false)
     loadExams()
   }
@@ -1045,6 +1118,15 @@ function ExamsScreen() {
   async function saveResumeDate(examId) {
     await supabase.from('exams').update({ term_resumes_on: editingResumeValue || null }).eq('id', examId)
     setEditingResumeId(null)
+    loadExams()
+  }
+
+  async function saveOfficialsEdit(examId, pName, mName, pFile, mFile) {
+    const updates = { principal_name: pName.trim() || null, manager_name: mName.trim() || null }
+    if (pFile) updates.principal_signature_url = await uploadSignature(pFile, 'principal')
+    if (mFile) updates.manager_signature_url = await uploadSignature(mFile, 'manager')
+    await supabase.from('exams').update(updates).eq('id', examId)
+    setEditingOfficialsId(null)
     loadExams()
   }
 
@@ -1057,22 +1139,60 @@ function ExamsScreen() {
 
       <div style={{
         background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 18, marginBottom: 24,
-        display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, alignItems: isNarrow ? 'stretch' : 'flex-end', flexWrap: 'wrap',
       }}>
-        <label style={fieldLabel}>Exam name
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Term 2 Opener" style={input} />
-        </label>
-        <label style={fieldLabel}>Term
-          <select value={term} onChange={(e) => setTerm(e.target.value)} style={input}>
-            <option>Term 1</option><option>Term 2</option><option>Term 3</option>
-          </select>
-        </label>
-        <label style={fieldLabel}>Year
-          <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))} style={input} />
-        </label>
-        <label style={fieldLabel}>Term resumes on (optional)
-          <input type="date" value={resumeDate} onChange={(e) => setResumeDate(e.target.value)} style={input} />
-        </label>
+        <div style={{ display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, alignItems: isNarrow ? 'stretch' : 'flex-end', flexWrap: 'wrap', marginBottom: 18 }}>
+          <label style={fieldLabel}>Exam name
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Term 2 Opener" style={input} />
+          </label>
+          <label style={fieldLabel}>Term
+            <select value={term} onChange={(e) => setTerm(e.target.value)} style={input}>
+              <option>Term 1</option><option>Term 2</option><option>Term 3</option>
+            </select>
+          </label>
+          <label style={fieldLabel}>Year
+            <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))} style={input} />
+          </label>
+          <label style={fieldLabel}>Term resumes on (optional)
+            <input type="date" value={resumeDate} onChange={(e) => setResumeDate(e.target.value)} style={input} />
+          </label>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 14, marginBottom: 14 }}>
+          <div style={sectionLabel}>Signing Officials for this exam</div>
+          {hasPreviousOfficials && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <button onClick={() => setOfficialsMode('same')} style={officialsMode === 'same' ? btn : secondaryBtn}>
+                Same as last time
+              </button>
+              <button onClick={() => setOfficialsMode('new')} style={officialsMode === 'new' ? btn : secondaryBtn}>
+                Enter new details
+              </button>
+            </div>
+          )}
+
+          {officialsMode === 'same' && hasPreviousOfficials ? (
+            <div style={{ fontSize: 12.5, color: COLORS.muted, background: COLORS.paper, padding: '10px 12px', borderRadius: 6 }}>
+              Will reuse: <strong style={{ color: COLORS.ink }}>{previousExam.principal_name || '—'}</strong> (Principal) &nbsp;·&nbsp;
+              <strong style={{ color: COLORS.ink }}>{previousExam.manager_name || '—'}</strong> (Manager)
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, flexWrap: 'wrap' }}>
+              <label style={fieldLabel}>Principal's name
+                <input value={principalName} onChange={(e) => setPrincipalName(e.target.value)} style={input} placeholder="e.g. Samuel Mburu" />
+              </label>
+              <label style={fieldLabel}>Principal's signature (image)
+                <input type="file" accept="image/*" onChange={(e) => setPrincipalSigFile(e.target.files[0])} style={input} />
+              </label>
+              <label style={fieldLabel}>School Manager's name
+                <input value={managerName} onChange={(e) => setManagerName(e.target.value)} style={input} placeholder="e.g. Andrias Hammer" />
+              </label>
+              <label style={fieldLabel}>School Manager's signature (image)
+                <input type="file" accept="image/*" onChange={(e) => setManagerSigFile(e.target.files[0])} style={input} />
+              </label>
+            </div>
+          )}
+        </div>
+
         <button onClick={createExam} disabled={saving} style={{ ...btn, width: isNarrow ? '100%' : 'auto' }}>{saving ? 'Creating...' : '+ Create Exam'}</button>
       </div>
 
@@ -2355,7 +2475,7 @@ export default function App() {
     if (profile.role === 'admin') {
       return (
         <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
-          <TopBar tab={tab} setTab={setTab} onLogout={handleLogout} fullName={profile.full_name} />
+          <TopBar tab={tab} setTab={setTab} onLogout={handleLogout} fullName={profile.full_name} title={profile.title} />
           {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
           {tab === 'Students' && <StudentsScreen />}
           {tab === 'Exams' && <ExamsScreen />}
