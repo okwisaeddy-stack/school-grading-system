@@ -235,7 +235,7 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Teachers', 'My Teaching', 'Approvals']
+  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Teachers', 'My Teaching', 'Approvals']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
@@ -2347,7 +2347,6 @@ function TeachersScreen() {
     const { data: teacherProfiles } = await supabase
       .from('profiles')
       .select('*')
-      .eq('role', 'teacher')
       .eq('status', 'approved')
       .order('full_name')
 
@@ -2383,28 +2382,39 @@ function TeachersScreen() {
 
   return (
     <div style={pageWrap}>
-      <h2>Teachers</h2>
+      <h2>Staff</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
-        Every teacher self-assigns their subjects/classes at signup. Remove an assignment here if it was set up wrong.
+        Every teacher (and any admin who also teaches) self-assigns their subjects/classes. Remove an assignment here if it was set up wrong.
       </p>
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : teachers.length === 0 ? (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 24, textAlign: 'center', color: COLORS.muted, fontSize: 13 }}>
-          No approved teachers yet.
+          No approved staff yet.
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {teachers.map((t) => (
             <div key={t.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10, flexWrap: 'wrap', gap: 6 }}>
                 <div>
                   <span style={{ fontSize: 14, fontWeight: 700 }}>{t.full_name}</span>
                   <span style={{ fontSize: 12, color: COLORS.muted, marginLeft: 8 }}>@{t.username}</span>
+                  {t.role === 'admin' ? (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.accent, background: COLORS.accentSoft, padding: '2px 8px', borderRadius: 10, marginLeft: 8 }}>
+                      {t.title || 'Admin'}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.good, background: COLORS.goodSoft, padding: '2px 8px', borderRadius: 10, marginLeft: 8 }}>
+                      Subject Teacher
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: 12 }}>
-                  <button onClick={() => promoteToAdmin(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                    Promote to Admin
-                  </button>
+                  {t.role !== 'admin' && (
+                    <button onClick={() => promoteToAdmin(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      Promote to Admin
+                    </button>
+                  )}
                   <button onClick={() => removeTeacher(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                     Remove
                   </button>
@@ -2424,6 +2434,175 @@ function TeachersScreen() {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// ADMIN: Performance Track — full class ranking list + most improved,
+// separate from individual report cards
+// ============================================================================
+function PerformanceTrackScreen() {
+  const [cohort, setCohort] = useState('form_4')
+  const [exams, setExams] = useState([])
+  const [selectedExamId, setSelectedExamId] = useState('')
+  const [rankings, setRankings] = useState([])
+  const [mostImproved, setMostImproved] = useState([])
+  const [loading, setLoading] = useState(false)
+  const isNarrow = useIsNarrow()
+
+  useEffect(() => {
+    supabase.from('exams').select('*').order('order_index', { ascending: false }).then(({ data }) => {
+      setExams(data || [])
+      if (data && data.length > 0) setSelectedExamId(data[0].id)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (selectedExamId && cohort) loadRankings()
+  }, [selectedExamId, cohort])
+
+  async function loadRankings() {
+    setLoading(true)
+    const exam = exams.find((e) => e.id === selectedExamId)
+    if (!exam) { setLoading(false); return }
+    const prevExam = exams
+      .filter((e) => e.order_index < exam.order_index)
+      .sort((a, b) => b.order_index - a.order_index)[0]
+
+    const [{ data: current }, { data: students }] = await Promise.all([
+      supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: selectedExamId }),
+      supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort),
+    ])
+    const studentById = Object.fromEntries((students || []).map((s) => [s.id, s]))
+
+    const currentRanked = (current || [])
+      .map((r) => ({ ...r, student: studentById[r.student_id] }))
+      .filter((r) => r.student)
+      .sort((a, b) => a.rnk - b.rnk)
+    setRankings(currentRanked)
+
+    if (prevExam) {
+      const { data: previous } = await supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: prevExam.id })
+      const prevByStudent = Object.fromEntries((previous || []).map((r) => [r.student_id, r]))
+
+      const improved = currentRanked
+        .filter((r) => prevByStudent[r.student_id])
+        .map((r) => {
+          const prev = prevByStudent[r.student_id]
+          return {
+            student: r.student,
+            currentRank: Number(r.rnk),
+            previousRank: Number(prev.rnk),
+            change: Number(prev.rnk) - Number(r.rnk), // positive = moved up (improved)
+            currentPoints: r.total_points,
+            previousPoints: prev.total_points,
+          }
+        })
+        .filter((r) => r.change > 0)
+        .sort((a, b) => b.change - a.change)
+        .slice(0, 10)
+      setMostImproved(improved)
+    } else {
+      setMostImproved([])
+    }
+    setLoading(false)
+  }
+
+  const cohortOptions = [
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
+
+  return (
+    <div style={pageWrap}>
+      <h2>Performance Track</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
+        Full class ranking and most-improved students for an exam, compared against the one before it.
+      </p>
+
+      <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
+        <label style={fieldLabel}>Cohort
+          <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={{ ...input, minWidth: 160 }}>
+            {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Exam
+          <select value={selectedExamId} onChange={(e) => setSelectedExamId(e.target.value)} style={{ ...input, minWidth: 220 }}>
+            {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <>
+          {mostImproved.length > 0 && (
+            <div style={{ marginBottom: 28 }}>
+              <div style={sectionLabel}>🏆 Most Improved</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {mostImproved.map((m, i) => (
+                  <div key={m.student.id} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    background: i === 0 ? COLORS.accentSoft : COLORS.card, border: `1px solid ${COLORS.ruleLight}`,
+                    borderRadius: 8, padding: '10px 16px', flexWrap: 'wrap', gap: 8,
+                  }}>
+                    <div>
+                      <span style={{ fontWeight: 700, fontSize: 13.5 }}>{i + 1}. {m.student.full_name}</span>
+                      <span style={{ fontSize: 11.5, color: COLORS.muted, marginLeft: 8 }}>{m.student.admission_no}</span>
+                    </div>
+                    <div style={{ fontSize: 12.5 }}>
+                      <span style={{ color: COLORS.muted }}>{m.previousRank}</span>
+                      <span style={{ margin: '0 6px' }}>→</span>
+                      <strong>{m.currentRank}</strong>
+                      <span style={{ color: COLORS.good, fontWeight: 700, marginLeft: 8 }}>▲ {m.change} {m.change === 1 ? 'place' : 'places'}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={sectionLabel}>Full Class Ranking</div>
+          {isNarrow ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {rankings.map((r) => (
+                <div key={r.student_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 14px' }}>
+                  <div>
+                    <span style={{ fontWeight: 700, fontSize: 13.5 }}>{r.rnk}. {r.student.full_name}</span>
+                    <div style={{ fontSize: 11, color: COLORS.muted }}>{r.student.admission_no}</div>
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{r.total_points}/{r.max_points}</div>
+                </div>
+              ))}
+              {rankings.length === 0 && (
+                <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+                  No marks recorded for this cohort/exam yet.
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+              <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
+                <thead><tr><th style={th}>Position</th><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={th}>Total Points</th></tr></thead>
+                <tbody>
+                  {rankings.map((r) => (
+                    <tr key={r.student_id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                      <td style={{ ...td, fontWeight: 700 }}>{r.rnk}</td>
+                      <td style={td}>{r.student.full_name}</td>
+                      <td style={{ ...td, color: COLORS.muted }}>{r.student.admission_no}</td>
+                      <td style={td}>{r.total_points} / {r.max_points}</td>
+                    </tr>
+                  ))}
+                  {rankings.length === 0 && (
+                    <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No marks recorded for this cohort/exam yet.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </div>
   )
@@ -2480,6 +2659,7 @@ export default function App() {
           {tab === 'Students' && <StudentsScreen />}
           {tab === 'Exams' && <ExamsScreen />}
           {tab === 'Reports' && <ReportsScreen />}
+          {tab === 'Performance Track' && <PerformanceTrackScreen />}
           {tab === 'Teachers' && <TeachersScreen />}
           {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
           {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
