@@ -235,7 +235,7 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Teachers', 'My Teaching', 'Approvals']
+  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
@@ -1590,9 +1590,10 @@ function MarksEntryContent({ teacherId }) {
 // ============================================================================
 function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const [showChangePw, setShowChangePw] = useState(false)
+  const [view, setView] = useState('marks') // 'marks' | 'attendance'
   return (
     <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
-      <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <img src="/crest.png" alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
           <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
@@ -1604,7 +1605,11 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
         </div>
       </div>
       <div style={pageWrap}>
-        <MarksEntryContent teacherId={teacherId} />
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
+          <button onClick={() => setView('attendance')} style={view === 'attendance' ? btn : secondaryBtn}>Attendance</button>
+        </div>
+        {view === 'marks' ? <MarksEntryContent teacherId={teacherId} /> : <TeacherAttendanceScreen teacherId={teacherId} />}
       </div>
       {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
@@ -2722,6 +2727,199 @@ function PerformanceTrackScreen() {
 }
 
 // ============================================================================
+// SHARED: Attendance core — date picker + student list + status toggles
+// ============================================================================
+function AttendanceCore({ classLabel, recorderId }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [students, setStudents] = useState([])
+  const [statusByStudent, setStatusByStudent] = useState({})
+  const [drafts, setDrafts] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savedMsg, setSavedMsg] = useState('')
+  const isNarrow = useIsNarrow()
+
+  useEffect(() => { if (classLabel) loadStudentsAndAttendance() }, [classLabel, date])
+
+  async function loadStudentsAndAttendance() {
+    setLoading(true)
+    const { data: studentData } = await supabase
+      .from('students').select('*').eq('cohort', classLabel).order('full_name')
+    setStudents(studentData || [])
+
+    const { data: attData } = await supabase
+      .from('attendance').select('*').eq('date', date)
+      .in('student_id', (studentData || []).map((s) => s.id))
+
+    const byStudent = {}
+    ;(attData || []).forEach((a) => { byStudent[a.student_id] = a.status })
+    setStatusByStudent(byStudent)
+    setDrafts({})
+    setLoading(false)
+  }
+
+  function setStatus(studentId, status) {
+    setDrafts((prev) => ({ ...prev, [studentId]: status }))
+  }
+
+  async function saveAll() {
+    setSaving(true)
+    setSavedMsg('')
+    const rows = students.map((s) => ({
+      student_id: s.id,
+      date,
+      status: drafts[s.id] || statusByStudent[s.id] || 'present',
+      recorded_by: recorderId,
+    }))
+    const { error } = await supabase.from('attendance').upsert(rows, { onConflict: 'student_id,date' })
+    if (!error) {
+      setSavedMsg(`Saved attendance for ${rows.length} students at ${new Date().toLocaleTimeString()}`)
+      loadStudentsAndAttendance()
+    }
+    setSaving(false)
+  }
+
+  function markAllPresent() {
+    const all = {}
+    students.forEach((s) => { all[s.id] = 'present' })
+    setDrafts(all)
+  }
+
+  const statusColors = {
+    present: { bg: COLORS.goodSoft, fg: COLORS.good, label: 'Present' },
+    absent: { bg: COLORS.warnSoft, fg: COLORS.warn, label: 'Absent' },
+    late: { bg: COLORS.accentSoft, fg: COLORS.accent, label: 'Late' },
+  }
+
+  const presentCount = students.filter((s) => (drafts[s.id] || statusByStudent[s.id] || 'present') === 'present').length
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <label style={fieldLabel}>Date
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={input} />
+        </label>
+        <button onClick={markAllPresent} style={secondaryBtn}>✓ Mark all present</button>
+        <div style={{ marginLeft: 'auto', fontSize: 12, color: COLORS.muted }}>
+          {presentCount} / {students.length} present
+        </div>
+      </div>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: isNarrow ? 8 : 0 }}>
+          {students.map((s, i) => {
+            const current = drafts[s.id] || statusByStudent[s.id] || 'present'
+            return (
+              <div
+                key={s.id}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '10px 14px', background: isNarrow ? COLORS.card : (i % 2 ? COLORS.paper : '#fff'),
+                  border: isNarrow ? `1px solid ${COLORS.ruleLight}` : 'none',
+                  borderRadius: isNarrow ? 8 : 0, borderBottom: isNarrow ? undefined : `1px solid ${COLORS.ruleLight}`,
+                  flexWrap: 'wrap', gap: 8,
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{s.full_name}</div>
+                  <div style={{ fontSize: 11, color: COLORS.muted }}>{s.admission_no}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {['present', 'absent', 'late'].map((st) => (
+                    <button
+                      key={st}
+                      onClick={() => setStatus(s.id, st)}
+                      style={{
+                        padding: '5px 12px', borderRadius: 14, fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
+                        border: `1px solid ${current === st ? statusColors[st].fg : COLORS.ruleLight}`,
+                        background: current === st ? statusColors[st].bg : '#fff',
+                        color: current === st ? statusColors[st].fg : COLORS.muted,
+                      }}
+                    >
+                      {statusColors[st].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+          {students.length === 0 && (
+            <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+              No students in this class yet.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+        <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg || 'Unsaved changes are only committed once you save.'}</span>
+        <button onClick={saveAll} disabled={saving || students.length === 0} style={btn}>{saving ? 'Saving...' : 'Save Attendance'}</button>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// ADMIN: Attendance — any cohort
+// ============================================================================
+function AdminAttendanceScreen({ profile }) {
+  const [cohort, setCohort] = useState('form_4')
+  const cohortOptions = [
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
+  return (
+    <div style={pageWrap}>
+      <h2>Attendance</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>Mark daily attendance for any class.</p>
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
+        <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={input}>
+          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      </label>
+      <AttendanceCore classLabel={cohort} recorderId={profile.id} />
+    </div>
+  )
+}
+
+// ============================================================================
+// TEACHER: Attendance — only their own assigned classes
+// ============================================================================
+function TeacherAttendanceScreen({ teacherId }) {
+  const [classLabels, setClassLabels] = useState([])
+  const [selected, setSelected] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => { loadMyClasses() }, [teacherId])
+
+  async function loadMyClasses() {
+    setLoading(true)
+    const { data } = await supabase.from('teacher_assignments').select('class_label').eq('teacher_id', teacherId)
+    const unique = [...new Set((data || []).map((a) => a.class_label))]
+    setClassLabels(unique)
+    if (unique.length > 0) setSelected(unique[0])
+    setLoading(false)
+  }
+
+  if (loading) return <p style={{ color: COLORS.muted }}>Loading...</p>
+  if (classLabels.length === 0) return <p style={{ color: COLORS.muted }}>No classes assigned yet.</p>
+
+  return (
+    <div>
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
+        <select value={selected} onChange={(e) => setSelected(e.target.value)} style={input}>
+          {classLabels.map((c) => (
+            <option key={c} value={c}>{CLASS_OPTIONS.find((opt) => opt.value === c)?.label || c}</option>
+          ))}
+        </select>
+      </label>
+      <AttendanceCore classLabel={selected} recorderId={teacherId} />
+    </div>
+  )
+}
+
+// ============================================================================
 // APP SHELL
 // ============================================================================
 export default function App() {
@@ -2773,6 +2971,7 @@ export default function App() {
           {tab === 'Exams' && <ExamsScreen />}
           {tab === 'Reports' && <ReportsScreen />}
           {tab === 'Performance Track' && <PerformanceTrackScreen />}
+          {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
           {tab === 'Teachers' && <TeachersScreen />}
           {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
           {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
