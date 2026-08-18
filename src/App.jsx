@@ -2385,6 +2385,16 @@ function TeachersScreen() {
     loadTeachers()
   }
 
+  async function setClassTeacher(teacherId, cohort) {
+    // Clear anyone else currently appointed to this cohort first —
+    // only one class teacher per cohort at a time
+    if (cohort) {
+      await supabase.from('profiles').update({ class_teacher_of: null }).eq('class_teacher_of', cohort)
+    }
+    await supabase.from('profiles').update({ class_teacher_of: cohort || null }).eq('id', teacherId)
+    loadTeachers()
+  }
+
   return (
     <div style={pageWrap}>
       <h2>Staff</h2>
@@ -2413,6 +2423,11 @@ function TeachersScreen() {
                       Subject Teacher
                     </span>
                   )}
+                  {t.class_teacher_of && (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#7A6A2E', background: '#F3EEDA', padding: '2px 8px', borderRadius: 10, marginLeft: 6 }}>
+                      Class Teacher — {CLASS_OPTIONS.find((c) => c.value === t.class_teacher_of)?.label}
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: 12 }}>
                   {t.role !== 'admin' && (
@@ -2425,6 +2440,21 @@ function TeachersScreen() {
                   </button>
                 </div>
               </div>
+              {t.role !== 'admin' && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 11.5, color: COLORS.muted }}>
+                    Class Teacher of:{' '}
+                    <select
+                      value={t.class_teacher_of || ''}
+                      onChange={(e) => setClassTeacher(t.id, e.target.value)}
+                      style={{ fontSize: 11.5, padding: '3px 6px', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 4 }}
+                    >
+                      <option value="">— None —</option>
+                      {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {t.assignments.length === 0 && (
                   <span style={{ fontSize: 12, color: COLORS.muted, fontStyle: 'italic' }}>No subjects assigned</span>
@@ -2887,34 +2917,33 @@ function AdminAttendanceScreen({ profile }) {
 // TEACHER: Attendance — only their own assigned classes
 // ============================================================================
 function TeacherAttendanceScreen({ teacherId }) {
-  const [classLabels, setClassLabels] = useState([])
-  const [selected, setSelected] = useState('')
+  const [classTeacherOf, setClassTeacherOf] = useState(undefined) // undefined = loading, null = not appointed
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { loadMyClasses() }, [teacherId])
+  useEffect(() => { loadMyAppointment() }, [teacherId])
 
-  async function loadMyClasses() {
+  async function loadMyAppointment() {
     setLoading(true)
-    const { data } = await supabase.from('teacher_assignments').select('class_label').eq('teacher_id', teacherId)
-    const unique = [...new Set((data || []).map((a) => a.class_label))]
-    setClassLabels(unique)
-    if (unique.length > 0) setSelected(unique[0])
+    const { data } = await supabase.from('profiles').select('class_teacher_of').eq('id', teacherId).single()
+    setClassTeacherOf(data?.class_teacher_of || null)
     setLoading(false)
   }
 
   if (loading) return <p style={{ color: COLORS.muted }}>Loading...</p>
-  if (classLabels.length === 0) return <p style={{ color: COLORS.muted }}>No classes assigned yet.</p>
+  if (!classTeacherOf) {
+    return (
+      <div style={{ background: COLORS.warnSoft, color: COLORS.warn, padding: '14px 18px', borderRadius: 8, fontSize: 13 }}>
+        You haven't been appointed as a Class Teacher yet. An admin needs to assign you to a class in the Teachers tab before you can take attendance.
+      </div>
+    )
+  }
 
   return (
     <div>
-      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
-        <select value={selected} onChange={(e) => setSelected(e.target.value)} style={input}>
-          {classLabels.map((c) => (
-            <option key={c} value={c}>{CLASS_OPTIONS.find((opt) => opt.value === c)?.label || c}</option>
-          ))}
-        </select>
-      </label>
-      <AttendanceCore classLabel={selected} recorderId={teacherId} />
+      <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 16 }}>
+        You are the Class Teacher for <strong style={{ color: COLORS.ink }}>{CLASS_OPTIONS.find((c) => c.value === classTeacherOf)?.label}</strong>.
+      </div>
+      <AttendanceCore classLabel={classTeacherOf} recorderId={teacherId} />
     </div>
   )
 }
