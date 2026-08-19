@@ -487,6 +487,14 @@ function ApprovalsScreen({ currentUserId }) {
 // ============================================================================
 // ADD STUDENT MODAL
 // ============================================================================
+const GRADE10_COMPULSORY = ['Mathematics', 'English', 'Kiswahili', 'Community Service Learning', 'Physical Education', 'ICT']
+const GRADE10_NON_EXAMINABLE = ['Physical Education', 'ICT']
+const GRADE10_ELECTIVE_MENU = [
+  'Biology', 'Chemistry', 'Physics', 'Computer Studies', 'Agriculture', 'Media Technology',
+  'Foreign Languages', 'Local Languages', 'Business Studies', 'History', 'Geography',
+  'CRE', 'Music', 'Dance', 'Theatre', 'Visual Arts', 'Sports Science',
+]
+
 function AddStudentModal({ onClose, onSaved }) {
   const [allSubjects, setAllSubjects] = useState([])
   const [cohort, setCohort] = useState('form_4')
@@ -495,6 +503,7 @@ function AddStudentModal({ onClose, onSaved }) {
   const [admissionNo, setAdmissionNo] = useState('')
   const [electives, setElectives] = useState([])
   const [oneOfChoice, setOneOfChoice] = useState('')
+  const [grade10Electives, setGrade10Electives] = useState([])
   const [entranceRaw, setEntranceRaw] = useState('')
   const [parentName, setParentName] = useState('')
   const [parentPhone, setParentPhone] = useState('')
@@ -506,6 +515,10 @@ function AddStudentModal({ onClose, onSaved }) {
   useEffect(() => {
     supabase.from('subjects').select('*').then(({ data }) => setAllSubjects(data || []))
   }, [])
+
+  function toggleGrade10Elective(subject) {
+    setGrade10Electives((prev) => (prev.includes(subject) ? prev.filter((s) => s !== subject) : [...prev, subject]))
+  }
 
   function toggleElective(subject) {
     if (electives.includes(subject)) {
@@ -571,6 +584,15 @@ function AddStudentModal({ onClose, onSaved }) {
       await supabase.from('student_subjects').insert(rows)
     }
 
+    if (cohort === 'grade_10') {
+      const subjectByName = Object.fromEntries(allSubjects.map((s) => [s.name, s.id]))
+      const rows = [
+        ...GRADE10_COMPULSORY.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: true })),
+        ...grade10Electives.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: false })),
+      ].filter((r) => r.subject_id)
+      await supabase.from('student_subjects').insert(rows)
+    }
+
     const validPast = pastExams.filter((p) => p.label.trim() && p.points !== '')
     if (validPast.length > 0) {
       const rows = validPast.map((p, i) => ({
@@ -601,7 +623,7 @@ function AddStudentModal({ onClose, onSaved }) {
             <input value={admissionNo} onChange={(e) => setAdmissionNo(e.target.value)} style={input} />
           </label>
           <label style={fieldLabel}>Cohort
-            <select value={cohort} onChange={(e) => { setCohort(e.target.value); setElectives([]); setOneOfChoice('') }} style={input}>
+            <select value={cohort} onChange={(e) => { setCohort(e.target.value); setElectives([]); setOneOfChoice(''); setGrade10Electives([]) }} style={input}>
               <option value="form_3">Form 3</option>
               <option value="form_4">Form 4</option>
               <option value="grade_10">Grade 10</option>
@@ -650,6 +672,29 @@ function AddStudentModal({ onClose, onSaved }) {
             </div>
             <button onClick={() => toggleElective('CRE')} style={{ ...pillBtn(electives.includes('CRE')), marginBottom: 14 }}>+ CRE (optional)</button>
             {blockedMsg && <div style={{ background: COLORS.warnSoft, color: COLORS.warn, padding: '8px 12px', borderRadius: 6, fontSize: 12.5, marginBottom: 14 }}>⚠ {blockedMsg}</div>}
+          </>
+        )}
+
+        {cohort === 'grade_10' && (
+          <>
+            <div style={sectionLabel}>Compulsory (auto-included)</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+              {GRADE10_COMPULSORY.map((s) => (
+                <span key={s} style={pillStatic}>
+                  {s}{GRADE10_NON_EXAMINABLE.includes(s) ? ' (non-examinable)' : ''}
+                </span>
+              ))}
+            </div>
+            <p style={{ fontSize: 11, color: COLORS.muted, marginBottom: 14 }}>
+              Mathematics is tracked as one subject regardless of Core/Essential — no need to distinguish.
+            </p>
+
+            <div style={sectionLabel}>Electives — pick as many as needed (no minimum)</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+              {GRADE10_ELECTIVE_MENU.map((s) => (
+                <button key={s} onClick={() => toggleGrade10Elective(s)} style={pillBtn(grade10Electives.includes(s))}>{s}</button>
+              ))}
+            </div>
           </>
         )}
 
