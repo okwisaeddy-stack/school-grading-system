@@ -88,18 +88,39 @@ function Login({ onSwitchToSignup }) {
   )
 }
 
+const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies': 1 }
+
 function Signup({ onSwitchToLogin, onSignedUp }) {
   const [fullName, setFullName] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [roleChoice, setRoleChoice] = useState('teacher') // 'teacher' | 'Principal' | 'Deputy Principal' | 'Dean of Studies'
+  const [titleCounts, setTitleCounts] = useState({})
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    // Count existing pending + approved admins per title, so we can block
+    // signing up for a slot that's already taken or already requested
+    supabase.from('profiles').select('title').eq('role', 'admin').in('status', ['pending', 'approved']).then(({ data }) => {
+      const counts = {}
+      ;(data || []).forEach((p) => { if (p.title) counts[p.title] = (counts[p.title] || 0) + 1 })
+      setTitleCounts(counts)
+    })
+  }, [])
+
+  function isTitleFull(title) {
+    return (titleCounts[title] || 0) >= TITLE_LIMITS[title]
+  }
 
   async function handleSignup(e) {
     e.preventDefault()
     setError('')
     if (password.length < 6) { setError('Password must be at least 6 characters.'); return }
+    if (roleChoice !== 'teacher' && isTitleFull(roleChoice)) {
+      setError(`${roleChoice} already has the maximum number of people (${TITLE_LIMITS[roleChoice]}) signed up or approved.`)
+      return
+    }
     setLoading(true)
     const email = usernameToEmail(username)
     const { data, error } = await supabase.auth.signUp({ email, password })
@@ -132,12 +153,12 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
         <label style={fieldLabel}>Your role
           <select value={roleChoice} onChange={(e) => setRoleChoice(e.target.value)} style={input}>
             <option value="teacher">Subject Teacher</option>
-            <option value="Principal">Principal</option>
-            <option value="Deputy Principal">Deputy Principal</option>
-            <option value="Dean of Studies">Dean of Studies</option>
+            <option value="Principal" disabled={isTitleFull('Principal')}>Principal{isTitleFull('Principal') ? ' (taken)' : ''}</option>
+            <option value="Deputy Principal" disabled={isTitleFull('Deputy Principal')}>Deputy Principal{isTitleFull('Deputy Principal') ? ' (full)' : ''}</option>
+            <option value="Dean of Studies" disabled={isTitleFull('Dean of Studies')}>Dean of Studies{isTitleFull('Dean of Studies') ? ' (taken)' : ''}</option>
           </select>
         </label>
-        {roleChoice !== 'teacher' && (
+        {roleChoice !== 'teacher' && !isTitleFull(roleChoice) && (
           <p style={{ fontSize: 11.5, color: COLORS.accent, marginTop: -4, marginBottom: 10 }}>
             Leadership roles get full admin access once approved — an existing admin will confirm this is genuinely you before it's granted.
           </p>
@@ -397,6 +418,17 @@ function ApprovalsScreen({ currentUserId }) {
   }
 
   async function approve(id) {
+    const person = pending.find((p) => p.id === id)
+    if (person?.role === 'admin' && person.title) {
+      const limit = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies': 1 }[person.title]
+      const { count } = await supabase
+        .from('profiles').select('*', { count: 'exact', head: true })
+        .eq('role', 'admin').eq('title', person.title).eq('status', 'approved')
+      if ((count ?? 0) >= limit) {
+        alert(`Can't approve — ${person.title} already has the maximum of ${limit} approved. Reject this request or remove/reassign the existing one first.`)
+        return
+      }
+    }
     setActioningId(id)
     await supabase.from('profiles').update({ status: 'approved', approved_by: currentUserId, approved_at: new Date().toISOString() }).eq('id', id)
     setActioningId(null)
