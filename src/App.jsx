@@ -1108,6 +1108,123 @@ function StudentsScreen() {
 // ============================================================================
 // EXAMS SCREEN
 // ============================================================================
+// ============================================================================
+// ADMIN: Exam Marks Overview — see every student's marks for an exam,
+// organized by cohort
+// ============================================================================
+function ExamMarksOverview({ exam, onBack }) {
+  const [cohort, setCohort] = useState('form_4')
+  const [students, setStudents] = useState([])
+  const [subjectColumns, setSubjectColumns] = useState([])
+  const [marksGrid, setMarksGrid] = useState({}) // { studentId: { subjectId: score } }
+  const [rankings, setRankings] = useState({}) // { studentId: { rnk, total_points, max_points } }
+  const [loading, setLoading] = useState(true)
+  const isNarrow = useIsNarrow()
+
+  const cohortOptions = [
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
+
+  useEffect(() => { loadOverview() }, [cohort])
+
+  async function loadOverview() {
+    setLoading(true)
+    const { data: studentData } = await supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort).order('full_name')
+    setStudents(studentData || [])
+    const studentIds = (studentData || []).map((s) => s.id)
+
+    if (studentIds.length === 0) {
+      setSubjectColumns([])
+      setMarksGrid({})
+      setRankings({})
+      setLoading(false)
+      return
+    }
+
+    const { data: enrollments } = await supabase
+      .from('student_subjects').select('subject_id, subjects(id, name)').in('student_id', studentIds)
+    const subjectMap = {}
+    ;(enrollments || []).forEach((e) => { if (e.subjects) subjectMap[e.subjects.id] = e.subjects.name })
+    const columns = Object.entries(subjectMap).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+    setSubjectColumns(columns)
+
+    const { data: marksData } = await supabase
+      .from('marks').select('student_id, subject_id, score').eq('exam_id', exam.id).in('student_id', studentIds)
+    const grid = {}
+    ;(marksData || []).forEach((m) => {
+      if (!grid[m.student_id]) grid[m.student_id] = {}
+      grid[m.student_id][m.subject_id] = m.score
+    })
+    setMarksGrid(grid)
+
+    const { data: rankData } = await supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: exam.id })
+    const rankMap = {}
+    ;(rankData || []).forEach((r) => { rankMap[r.student_id] = r })
+    setRankings(rankMap)
+
+    setLoading(false)
+  }
+
+  return (
+    <div style={pageWrap}>
+      <button onClick={onBack} style={{ ...secondaryBtn, marginBottom: 16 }}>← Back to Exams</button>
+      <h2>{exam.name} — Marks Overview</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>{exam.term} {exam.year}</p>
+
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Cohort
+        <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={input}>
+          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      </label>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : students.length === 0 ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No students in this cohort yet.
+        </div>
+      ) : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', minWidth: 480 + subjectColumns.length * 90, borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: COLORS.paper }}>
+                <th style={{ ...th, position: isNarrow ? 'static' : 'sticky', left: 0, background: COLORS.paper, zIndex: 1 }}>Student</th>
+                {subjectColumns.map((c) => <th key={c.id} style={{ ...th, textAlign: 'center' }}>{c.name}</th>)}
+                <th style={{ ...th, textAlign: 'center' }}>Total</th>
+                <th style={{ ...th, textAlign: 'center' }}>Position</th>
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((s) => {
+                const rank = rankings[s.id]
+                return (
+                  <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                    <td style={{ ...td, position: isNarrow ? 'static' : 'sticky', left: 0, background: '#fff', fontWeight: 600 }}>
+                      {s.full_name}
+                      <div style={{ fontSize: 10.5, color: COLORS.muted, fontWeight: 400 }}>{s.admission_no}</div>
+                    </td>
+                    {subjectColumns.map((c) => (
+                      <td key={c.id} style={{ ...td, textAlign: 'center' }}>
+                        {marksGrid[s.id]?.[c.id] ?? '—'}
+                      </td>
+                    ))}
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700 }}>
+                      {rank ? `${rank.total_points}/${rank.max_points}` : '—'}
+                    </td>
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: COLORS.accent }}>
+                      {rank ? rank.rnk : '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ExamsScreen() {
   const [exams, setExams] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1208,6 +1325,11 @@ function ExamsScreen() {
   }
 
   const isNarrow = useIsNarrow()
+  const [viewingExam, setViewingExam] = useState(null)
+
+  if (viewingExam) {
+    return <ExamMarksOverview exam={viewingExam} onBack={() => setViewingExam(null)} />
+  }
 
   return (
     <div style={pageWrap}>
@@ -1299,6 +1421,9 @@ function ExamsScreen() {
                   </span>
                 )}
               </div>
+              <button onClick={() => setViewingExam(e)} style={{ ...secondaryBtn, marginTop: 10, width: '100%', fontSize: 12 }}>
+                📊 View Marks
+              </button>
             </div>
           ))}
           {exams.length === 0 && (
@@ -1311,7 +1436,7 @@ function ExamsScreen() {
         // ---- Table layout for desktop ----
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
           <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-            <thead><tr><th style={th}>#</th><th style={th}>Exam</th><th style={th}>Term</th><th style={th}>Year</th><th style={th}>Term Resumes</th></tr></thead>
+            <thead><tr><th style={th}>#</th><th style={th}>Exam</th><th style={th}>Term</th><th style={th}>Year</th><th style={th}>Term Resumes</th><th style={th}></th></tr></thead>
             <tbody>
               {exams.map((e) => (
                 <tr key={e.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
@@ -1334,10 +1459,15 @@ function ExamsScreen() {
                       </span>
                     )}
                   </td>
+                  <td style={{ ...td, textAlign: 'right' }}>
+                    <button onClick={() => setViewingExam(e)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      📊 View Marks
+                    </button>
+                  </td>
                 </tr>
               ))}
               {exams.length === 0 && (
-                <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No exams yet.</td></tr>
+                <tr><td colSpan={6} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No exams yet.</td></tr>
               )}
             </tbody>
           </table>
@@ -2098,6 +2228,7 @@ function buildSmsMessage(report) {
 
 function ReportsScreen() {
   const [mode, setMode] = useState('single') // single | batch
+  const [batchCohortFilter, setBatchCohortFilter] = useState('form_4')
   const [exams, setExams] = useState([])
   const [students, setStudents] = useState([])
   const [selectedExamId, setSelectedExamId] = useState('')
@@ -2340,20 +2471,46 @@ function ReportsScreen() {
 
       {mode === 'batch' && (
         <>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <label style={fieldLabel}>Class
+              <select value={batchCohortFilter} onChange={(e) => setBatchCohortFilter(e.target.value)} style={{ ...input, minWidth: 180 }}>
+                <option value="form_3">Form 3</option>
+                <option value="form_4">Form 4</option>
+                <option value="grade_10">Grade 10</option>
+              </select>
+            </label>
+            <button
+              onClick={() => {
+                const idsInClass = students.filter((s) => s.cohort === batchCohortFilter).map((s) => s.id)
+                setSelectedBatchIds(new Set(idsInClass))
+              }}
+              style={secondaryBtn}
+            >
+              ✓ Select all in this class
+            </button>
+            <button onClick={() => setSelectedBatchIds(new Set())} style={secondaryBtn}>Clear selection</button>
+          </div>
+
           <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto', marginBottom: 16 }}>
             <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
               <thead><tr><th style={th}></th><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={th}>Cohort</th></tr></thead>
               <tbody>
-                {students.map((s) => (
-                  <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
-                    <td style={{ ...td, width: 34 }}>
-                      <input type="checkbox" checked={selectedBatchIds.has(s.id)} onChange={() => toggleBatch(s.id)} />
-                    </td>
-                    <td style={td}>{s.full_name}</td>
-                    <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
-                    <td style={td}>{s.cohort}</td>
-                  </tr>
-                ))}
+                {students
+                  .filter((s) => s.cohort === batchCohortFilter)
+                  .sort((a, b) => a.full_name.localeCompare(b.full_name))
+                  .map((s) => (
+                    <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                      <td style={{ ...td, width: 34 }}>
+                        <input type="checkbox" checked={selectedBatchIds.has(s.id)} onChange={() => toggleBatch(s.id)} />
+                      </td>
+                      <td style={td}>{s.full_name}</td>
+                      <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
+                      <td style={td}>{s.cohort}</td>
+                    </tr>
+                  ))}
+                {students.filter((s) => s.cohort === batchCohortFilter).length === 0 && (
+                  <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students in this class yet.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
