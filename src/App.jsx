@@ -1005,16 +1005,28 @@ function StudentsScreen() {
   const [showImport, setShowImport] = useState(false)
   const [editingStudent, setEditingStudent] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
+  const [cohortFilter, setCohortFilter] = useState('all')
   const isNarrow = useIsNarrow()
+
+  const cohortOptions = [
+    { value: 'all', label: 'All Classes' },
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
 
   useEffect(() => {
     loadStudents()
     supabase.from('subjects').select('*').then(({ data }) => setAllSubjects(data || []))
-  }, [])
+  }, [cohortFilter])
 
   async function loadStudents() {
     setLoading(true)
-    const { data } = await supabase.from('students').select('*').order('created_at', { ascending: false })
+    let query = supabase.from('students').select('*').order('created_at', { ascending: false })
+    if (cohortFilter !== 'all') {
+      query = query.eq('cohort', cohortFilter)
+    }
+    const { data } = await query
     setStudents(data || [])
     setLoading(false)
   }
@@ -1039,6 +1051,12 @@ function StudentsScreen() {
           <button onClick={() => setShowAdd(true)} style={btn}>+ Add Student</button>
         </div>
       </div>
+
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
+        <select value={cohortFilter} onChange={(e) => setCohortFilter(e.target.value)} style={input}>
+          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      </label>
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
         // ---- Card layout for phones: no horizontal scrolling needed ----
