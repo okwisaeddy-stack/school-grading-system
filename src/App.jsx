@@ -2853,7 +2853,7 @@ function PerformanceTrackScreen() {
     container.style.width = '800px'
     container.innerHTML = buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings)
     document.body.appendChild(container)
-    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800, width: 800 })
+    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff' })
     document.body.removeChild(container)
     const imgData = canvas.toDataURL('image/png')
     const pdf = new jsPDF('p', 'mm', 'a4')
