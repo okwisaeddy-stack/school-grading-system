@@ -3183,9 +3183,90 @@ function TeacherAttendanceScreen({ teacherId }) {
 }
 
 // ============================================================================
-// APP SHELL
+// GATE SCREEN — checks school-wide activation before showing login/app
 // ============================================================================
+function GateScreen({ children }) {
+  const [checking, setChecking] = useState(true)
+  const [active, setActive] = useState(false)
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [activating, setActivating] = useState(false)
+
+  useEffect(() => { checkActive() }, [])
+
+  async function checkActive() {
+    setChecking(true)
+    const { data, error } = await supabase.rpc('is_school_active')
+    if (error) {
+      setError('Could not reach the server. Please try again.')
+    } else {
+      setActive(!!data)
+    }
+    setChecking(false)
+  }
+
+  async function handleActivate(e) {
+    e.preventDefault()
+    setError('')
+    setActivating(true)
+    const { data, error } = await supabase.rpc('activate_school', { p_password: password })
+    if (error) {
+      setError('Something went wrong. Please try again.')
+    } else if (data === true) {
+      setActive(true)
+    } else {
+      setError('Incorrect activation password.')
+    }
+    setActivating(false)
+  }
+
+  if (checking) {
+    return (
+      <div style={wrap}>
+        <p style={{ color: COLORS.muted }}>Loading...</p>
+      </div>
+    )
+  }
+
+  if (!active) {
+    return (
+      <div style={wrap}>
+        <form onSubmit={handleActivate} style={card}>
+          <div style={{ textAlign: 'center', marginBottom: 14 }}>
+            <img src="/crest.png" alt="Crest" style={{ width: 56, height: 56, borderRadius: '50%' }} />
+          </div>
+          <h3 style={{ textAlign: 'center' }}>Activate This School</h3>
+          <p style={{ fontSize: 12, color: COLORS.muted, textAlign: 'center', marginBottom: 14 }}>
+            Enter the activation password provided to unlock access for this school.
+          </p>
+          <input
+            type="password"
+            placeholder="Activation password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={input}
+          />
+          {error && <p style={errorText}>{error}</p>}
+          <button type="submit" disabled={activating || !password} style={{ ...btn, width: '100%' }}>
+            {activating ? 'Activating...' : 'Activate'}
+          </button>
+        </form>
+      </div>
+    )
+  }
+
+  return children
+}
+
 export default function App() {
+  return (
+    <GateScreen>
+      <AppContent />
+    </GateScreen>
+  )
+}
+
+function AppContent() {
   const [session, setSession] = useState(null)
   const [profile, setProfile] = useState(null)
   const [stage, setStage] = useState('login')
