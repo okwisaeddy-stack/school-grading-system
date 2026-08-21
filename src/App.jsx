@@ -2252,7 +2252,7 @@ function ReportsScreen() {
   }, [])
 
   // Core computation for a single student — reused by both single & batch modes
-  async function computeReportFor(student, examId) {
+async function computeReportFor(student, examId, cache = {}) {
     const isCbc = student.cohort === 'grade_10'
     const exam = exams.find((e) => e.id === examId)
     const prevExam = exams.filter((e) => e.order_index < exam.order_index).sort((a, b) => b.order_index - a.order_index)[0]
@@ -2283,28 +2283,35 @@ function ReportsScreen() {
       ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })))
       : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })))
 
-    const { data: rankings } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: examId })
-    const sorted = (rankings || []).slice().sort((a, b) => a.rnk - b.rnk)
+    // Cache cohort rankings per exam so a batch run doesn't refetch the
+    // same cohort-wide ranking data for every single student.
+    const rankKey = `${student.cohort}:${examId}`
+    if (!cache[rankKey]) {
+      const { data } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: examId })
+      cache[rankKey] = data || []
+    }
+    const sorted = cache[rankKey].slice().sort((a, b) => a.rnk - b.rnk)
     const myRanking = sorted.find((r) => r.student_id === student.id)
     const position = myRanking ? Number(myRanking.rnk) : null
     const outOf = sorted.length
 
-    // Previous exam's total + position too, for the "This Term / Last Term" comparison
     let prevAggregate = null, prevPosition = null, prevOutOf = null
     if (prevExam) {
       prevAggregate = isCbc
         ? computeCbcTotal(subjectRows.map((r) => ({ score: r.prevScore })))
         : computeKcseAggregate(subjectRows.map((r) => ({ score: r.prevScore, is_compulsory: r.is_compulsory })))
-      const { data: prevRankings } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: prevExam.id })
-      const prevSorted = (prevRankings || []).slice().sort((a, b) => a.rnk - b.rnk)
+
+      const prevRankKey = `${student.cohort}:${prevExam.id}`
+      if (!cache[prevRankKey]) {
+        const { data } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: prevExam.id })
+        cache[prevRankKey] = data || []
+      }
+      const prevSorted = cache[prevRankKey].slice().sort((a, b) => a.rnk - b.rnk)
       const prevRanking = prevSorted.find((r) => r.student_id === student.id)
       prevPosition = prevRanking ? Number(prevRanking.rnk) : null
       prevOutOf = prevSorted.length
     }
 
-    // Build the full progress timeline: entrance score -> backfilled
-    // historical performance -> every real exam recorded in the system,
-    // each converted to a percentage so they all sit on the same 0-100 scale.
     const timeline = []
     if (student.entrance_type && student.entrance_score != null) {
       timeline.push({
@@ -2318,11 +2325,22 @@ function ReportsScreen() {
       timeline.push({ label: h.label, value: Math.round((h.points / h.max_points) * 100) })
     })
 
-    const { data: allExams } = await supabase.from('exams').select('*').order('order_index')
-    for (const ex of (allExams || [])) {
-      const { data: examMarks } = await supabase
-        .from('marks').select('score').eq('student_id', student.id).eq('exam_id', ex.id).in('subject_id', subjectIds)
-      if (examMarks && examMarks.length > 0) {
+    // Cache the full exams list too — identical for every student in a batch.
+    if (!cache.allExams) {
+      const { data } = await supabase.from('exams').select('*').order('order_index')
+      cache.allExams = data || []
+    }
+    const allExams = cache.allExams
+
+    // Single batched query covering every exam's marks at once,
+    // instead of looping and firing one query per exam.
+    const { data: allExamMarks } = await supabase
+      .from('marks').select('score, exam_id').eq('student_id', student.id).in('subject_id', subjectIds)
+      .in('exam_id', allExams.map((e) => e.id))
+
+    for (const ex of allExams) {
+      const examMarks = (allExamMarks || []).filter((m) => m.exam_id === ex.id)
+      if (examMarks.length > 0) {
         const meanScore = examMarks.reduce((sum, m) => sum + m.score, 0) / examMarks.length
         timeline.push({ label: ex.name, value: Math.round(meanScore) })
       }
@@ -2363,10 +2381,6 @@ function ReportsScreen() {
   }
 
   async function handleDownloadPdf() {
-    // Render into a hidden, fixed-width off-screen container rather than
-    // capturing the visible on-page element — capturing the live element
-    // is unreliable on phones, since it reflows to whatever narrow width
-    // the screen gives it and can capture incompletely.
     const blob = await reportToPdfBlob({ ...report, principalComment, classTeacherComment })
     const fileName = `${report.student.admission_no}_${report.student.full_name.replace(/\s+/g, '_')}_${report.exam.name.replace(/\s+/g, '_')}.pdf`
     const url = URL.createObjectURL(blob)
@@ -2389,14 +2403,24 @@ function ReportsScreen() {
     if (selectedBatchIds.size === 0 || !selectedExamId) return
     setLoading(true)
     setBatchResults([])
+    const cache = {}
+    const ids = Array.from(selectedBatchIds)
+
+    // Run a handful of students in parallel instead of strictly one at a
+    // time — noticeably faster without overwhelming Supabase.
+    const CONCURRENCY = 5
     const results = []
-    for (const id of selectedBatchIds) {
-      const student = students.find((s) => s.id === id)
-      const r = await computeReportFor(student, selectedExamId)
-      const { error } = await saveReport(r, '', '')
-      results.push({ student, ok: !error, report: r })
+    for (let i = 0; i < ids.length; i += CONCURRENCY) {
+      const batch = ids.slice(i, i + CONCURRENCY)
+      const batchResults = await Promise.all(batch.map(async (id) => {
+        const student = students.find((s) => s.id === id)
+        const r = await computeReportFor(student, selectedExamId, cache)
+        const { error } = await saveReport(r, '', '')
+        return { student, ok: !error, report: r }
+      }))
+      results.push(...batchResults)
+      setBatchResults([...results])
     }
-    setBatchResults(results)
     setLoading(false)
   }
 
@@ -2581,7 +2605,7 @@ function TeachersScreen() {
 
   useEffect(() => { loadTeachers() }, [])
 
-  async function loadTeachers() {
+async function loadTeachers() {
     setLoading(true)
     const { data: teacherProfiles } = await supabase
       .from('profiles')
@@ -2589,15 +2613,21 @@ function TeachersScreen() {
       .eq('status', 'approved')
       .order('full_name')
 
-    const withAssignments = await Promise.all(
-      (teacherProfiles || []).map(async (t) => {
-        const { data: assignments } = await supabase
+    const teacherIds = (teacherProfiles || []).map((t) => t.id)
+
+    // One query for every teacher's assignments, instead of one query per teacher.
+    const { data: allAssignments } = teacherIds.length > 0
+      ? await supabase
           .from('teacher_assignments')
           .select('*, subjects(name)')
-          .eq('teacher_id', t.id)
-        return { ...t, assignments: assignments || [] }
-      })
-    )
+          .in('teacher_id', teacherIds)
+      : { data: [] }
+
+    const withAssignments = (teacherProfiles || []).map((t) => ({
+      ...t,
+      assignments: (allAssignments || []).filter((a) => a.teacher_id === t.id),
+    }))
+
     setTeachers(withAssignments)
     setLoading(false)
   }
