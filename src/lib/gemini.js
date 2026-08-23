@@ -86,10 +86,10 @@ Instructions:
       'Authorization': `Bearer ${GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'llama-3.1-8b-instant',
+      model: 'openai/gpt-oss-20b',
       messages: [{ role: 'user', content: promptText }],
       temperature: 0.3,
-      max_tokens: 30,
+      max_tokens: 200,
     }),
   })
   if (!response.ok) {
@@ -100,7 +100,8 @@ Instructions:
     throw new Error(errData.error?.message || `Generation failed with status ${response.status}`)
   }
   const result = await response.json()
-  const rawRemark = result?.choices?.[0]?.message?.content?.trim() || ''
+  const message = result?.choices?.[0]?.message || {}
+  const rawRemark = (message.content?.trim() || message.reasoning?.trim() || '')
   // Clean quotes or markdown wrappers
   const cleanRemark = rawRemark.replace(/^["'`]|["'`]$/g, '').trim()
   // Log generation in audit log
