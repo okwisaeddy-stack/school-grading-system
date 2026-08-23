@@ -2611,10 +2611,10 @@ async function computeReportFor(student, examId, cache = {}) {
                     <button
                       onClick={handleGeneratePrincipalComment}
                       disabled={generatingPrincipal}
-                      title="Generate with AI (optional)"
-                      style={{ ...secondaryBtn, height: 'fit-content', flexShrink: 0 }}
+                      title="Generate remark"
+                      style={{ ...secondaryBtn, padding: '4px 10px', height: 'fit-content', flexShrink: 0 }}
                     >
-                      {generatingPrincipal ? '…' : '✨ Generate'}
+                      {generatingPrincipal ? '…' : '✨'}
                     </button>
                   </div>
                 </label>
@@ -2624,10 +2624,10 @@ async function computeReportFor(student, examId, cache = {}) {
                     <button
                       onClick={handleGenerateTeacherComment}
                       disabled={generatingTeacher}
-                      title="Generate with AI (optional)"
-                      style={{ ...secondaryBtn, height: 'fit-content', flexShrink: 0 }}
+                      title="Generate remark"
+                      style={{ ...secondaryBtn, padding: '4px 10px', height: 'fit-content', flexShrink: 0 }}
                     >
-                      {generatingTeacher ? '…' : '✨ Generate'}
+                      {generatingTeacher ? '…' : '✨'}
                     </button>
                   </div>
                 </label>
@@ -2679,7 +2679,7 @@ async function computeReportFor(student, examId, cache = {}) {
           </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: COLORS.muted, marginBottom: 14, cursor: 'pointer' }}>
             <input type="checkbox" checked={batchGenerateComments} onChange={(e) => setBatchGenerateComments(e.target.checked)} />
-            Also generate AI comments (Principal & Class Teacher) for each student — optional, takes longer for large classes
+            Also generate Principal & Class Teacher comments for each student — optional, takes longer for large classes
           </label>
           <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto', marginBottom: 16 }}>
             <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
