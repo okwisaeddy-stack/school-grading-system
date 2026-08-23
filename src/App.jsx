@@ -262,7 +262,7 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
+const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
