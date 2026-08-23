@@ -6,6 +6,7 @@ import JSZip from 'jszip'
 import { supabase } from './lib/supabaseClient'
 import {
   generateStudentRemark,
+  generateReportComment,
   isAutomatedRemarksEnabled,
   setAutomatedRemarksEnabled,
   getAutomatedRemarksCount,
@@ -2353,7 +2354,7 @@ function buildSmsMessage(report) {
   return lines.join('\n')
 }
 
-function ReportsScreen() {
+  function ReportsScreen() {
   const [mode, setMode] = useState('single') // single | batch
   const [batchCohortFilter, setBatchCohortFilter] = useState('form_4')
   const [exams, setExams] = useState([])
@@ -2369,7 +2370,9 @@ function ReportsScreen() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
-
+  const [generatingPrincipal, setGeneratingPrincipal] = useState(false)
+  const [generatingTeacher, setGeneratingTeacher] = useState(false)
+  const [batchGenerateComments, setBatchGenerateComments] = useState(false)
   useEffect(() => {
     supabase.from('exams').select('*').order('order_index', { ascending: false }).then(({ data }) => {
       setExams(data || [])
@@ -2377,21 +2380,17 @@ function ReportsScreen() {
     })
     supabase.from('students').select('*').order('full_name').then(({ data }) => setStudents(data || []))
   }, [])
-
   // Core computation for a single student — reused by both single & batch modes
 async function computeReportFor(student, examId, cache = {}) {
     const isCbc = student.cohort === 'grade_10'
     const exam = exams.find((e) => e.id === examId)
     const prevExam = exams.filter((e) => e.order_index < exam.order_index).sort((a, b) => b.order_index - a.order_index)[0]
-
     const { data: studentSubjects } = await supabase.from('student_subjects').select('*, subjects(id, name)').eq('student_id', student.id)
     const subjectIds = (studentSubjects || []).map((ss) => ss.subject_id)
-
     const { data: nowMarks } = await supabase.from('marks').select('*').eq('student_id', student.id).eq('exam_id', examId).in('subject_id', subjectIds)
     const { data: prevMarks } = prevExam
       ? await supabase.from('marks').select('*').eq('student_id', student.id).eq('exam_id', prevExam.id).in('subject_id', subjectIds)
       : { data: [] }
-
     const subjectRows = (studentSubjects || []).map((ss) => {
       const now = (nowMarks || []).find((m) => m.subject_id === ss.subject_id)
       const prev = (prevMarks || []).find((m) => m.subject_id === ss.subject_id)
@@ -2405,11 +2404,9 @@ async function computeReportFor(student, examId, cache = {}) {
         remark: now ? now.remark : null,
       }
     })
-
     const aggregate = isCbc
       ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })))
       : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })))
-
     // Cache cohort rankings per exam so a batch run doesn't refetch the
     // same cohort-wide ranking data for every single student.
     const rankKey = `${student.cohort}:${examId}`
@@ -2421,13 +2418,11 @@ async function computeReportFor(student, examId, cache = {}) {
     const myRanking = sorted.find((r) => r.student_id === student.id)
     const position = myRanking ? Number(myRanking.rnk) : null
     const outOf = sorted.length
-
     let prevAggregate = null, prevPosition = null, prevOutOf = null
     if (prevExam) {
       prevAggregate = isCbc
         ? computeCbcTotal(subjectRows.map((r) => ({ score: r.prevScore })))
         : computeKcseAggregate(subjectRows.map((r) => ({ score: r.prevScore, is_compulsory: r.is_compulsory })))
-
       const prevRankKey = `${student.cohort}:${prevExam.id}`
       if (!cache[prevRankKey]) {
         const { data } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: prevExam.id })
@@ -2438,7 +2433,6 @@ async function computeReportFor(student, examId, cache = {}) {
       prevPosition = prevRanking ? Number(prevRanking.rnk) : null
       prevOutOf = prevSorted.length
     }
-
     const timeline = []
     if (student.entrance_type && student.entrance_score != null) {
       timeline.push({
@@ -2451,20 +2445,17 @@ async function computeReportFor(student, examId, cache = {}) {
     ;(historical || []).forEach((h) => {
       timeline.push({ label: h.label, value: Math.round((h.points / h.max_points) * 100) })
     })
-
     // Cache the full exams list too — identical for every student in a batch.
     if (!cache.allExams) {
       const { data } = await supabase.from('exams').select('*').order('order_index')
       cache.allExams = data || []
     }
     const allExams = cache.allExams
-
     // Single batched query covering every exam's marks at once,
     // instead of looping and firing one query per exam.
     const { data: allExamMarks } = await supabase
       .from('marks').select('score, exam_id').eq('student_id', student.id).in('subject_id', subjectIds)
       .in('exam_id', allExams.map((e) => e.id))
-
     for (const ex of allExams) {
       const examMarks = (allExamMarks || []).filter((m) => m.exam_id === ex.id)
       if (examMarks.length > 0) {
@@ -2472,20 +2463,43 @@ async function computeReportFor(student, examId, cache = {}) {
         timeline.push({ label: ex.name, value: Math.round(meanScore) })
       }
     }
-
     return { student, exam, prevExam, subjectRows, aggregate, position, outOf, isCbc, timeline, prevAggregate, prevPosition, prevOutOf }
   }
-
   async function generatePreview() {
     if (!selectedExamId || !selectedStudentId) return
     setLoading(true)
     setReport(null)
+    setPrincipalComment('')
+    setClassTeacherComment('')
     const student = students.find((s) => s.id === selectedStudentId)
     const r = await computeReportFor(student, selectedExamId)
     setReport(r)
     setLoading(false)
   }
-
+  async function handleGeneratePrincipalComment() {
+    if (!report) return
+    setGeneratingPrincipal(true)
+    try {
+      const comment = await generateReportComment(report.student, report.subjectRows, report.aggregate, report.position, report.outOf, 'principal')
+      setPrincipalComment(comment)
+    } catch (err) {
+      alert(`Couldn't generate Principal's comment: ${err.message}`)
+    } finally {
+      setGeneratingPrincipal(false)
+    }
+  }
+  async function handleGenerateTeacherComment() {
+    if (!report) return
+    setGeneratingTeacher(true)
+    try {
+      const comment = await generateReportComment(report.student, report.subjectRows, report.aggregate, report.position, report.outOf, 'teacher')
+      setClassTeacherComment(comment)
+    } catch (err) {
+      alert(`Couldn't generate Class Teacher's comment: ${err.message}`)
+    } finally {
+      setGeneratingTeacher(false)
+    }
+  }
   async function saveReport(r, pComment, cComment) {
     const { data: { user } } = await supabase.auth.getUser()
     return supabase.from('report_cards').upsert({
@@ -2498,7 +2512,6 @@ async function computeReportFor(student, examId, cache = {}) {
       class_teacher_comment: cComment,
     }, { onConflict: 'student_id,exam_id' })
   }
-
   async function handleSaveSingle() {
     if (!report) return
     setSaving(true)
@@ -2506,7 +2519,6 @@ async function computeReportFor(student, examId, cache = {}) {
     if (!error) setSavedMsg(`Report saved at ${new Date().toLocaleTimeString()}`)
     setSaving(false)
   }
-
   async function handleDownloadPdf() {
     const blob = await reportToPdfBlob({ ...report, principalComment, classTeacherComment })
     const fileName = `${report.student.admission_no}_${report.student.full_name.replace(/\s+/g, '_')}_${report.exam.name.replace(/\s+/g, '_')}.pdf`
@@ -2517,7 +2529,6 @@ async function computeReportFor(student, examId, cache = {}) {
     a.click()
     URL.revokeObjectURL(url)
   }
-
   function toggleBatch(id) {
     setSelectedBatchIds((prev) => {
       const next = new Set(prev)
@@ -2525,50 +2536,59 @@ async function computeReportFor(student, examId, cache = {}) {
       return next
     })
   }
-
   async function handleBatchGenerate() {
     if (selectedBatchIds.size === 0 || !selectedExamId) return
     setLoading(true)
     setBatchResults([])
     const cache = {}
     const ids = Array.from(selectedBatchIds)
-
-    // Run a handful of students in parallel instead of strictly one at a
-    // time — noticeably faster without overwhelming Supabase.
-    const CONCURRENCY = 5
+    // Lower concurrency when AI comments are on — each student then makes
+    // 2 extra Groq calls (principal + teacher), so keep bursts gentler.
+    const CONCURRENCY = batchGenerateComments ? 2 : 5
     const results = []
     for (let i = 0; i < ids.length; i += CONCURRENCY) {
       const batch = ids.slice(i, i + CONCURRENCY)
-      const batchResults = await Promise.all(batch.map(async (id) => {
+      const batchResultsChunk = await Promise.all(batch.map(async (id) => {
         const student = students.find((s) => s.id === id)
         const r = await computeReportFor(student, selectedExamId, cache)
-        const { error } = await saveReport(r, '', '')
-        return { student, ok: !error, report: r }
+        let pComment = ''
+        let cComment = ''
+        let commentError = null
+        if (batchGenerateComments) {
+          try {
+            pComment = await generateReportComment(r.student, r.subjectRows, r.aggregate, r.position, r.outOf, 'principal')
+          } catch (err) {
+            commentError = err.message
+          }
+          try {
+            cComment = await generateReportComment(r.student, r.subjectRows, r.aggregate, r.position, r.outOf, 'teacher')
+          } catch (err) {
+            commentError = commentError || err.message
+          }
+        }
+        const { error } = await saveReport(r, pComment, cComment)
+        return { student, ok: !error, report: r, principalComment: pComment, classTeacherComment: cComment, commentError }
       }))
-      results.push(...batchResults)
+      results.push(...batchResultsChunk)
       setBatchResults([...results])
     }
     setLoading(false)
   }
-
   return (
     <div style={pageWrap}>
       <h2>Generate Reports</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
         Generate one student's report on demand, or batch-generate a whole class — each still produces its own separate report.
       </p>
-
       <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
         <button onClick={() => { setMode('single'); setBatchResults([]) }} style={mode === 'single' ? btn : secondaryBtn}>Single student</button>
         <button onClick={() => { setMode('batch'); setReport(null) }} style={mode === 'batch' ? btn : secondaryBtn}>Batch — multiple students</button>
       </div>
-
       <label style={{ ...fieldLabel, marginBottom: 16, maxWidth: 300 }}>Exam
         <select value={selectedExamId} onChange={(e) => { setSelectedExamId(e.target.value); setReport(null); setBatchResults([]) }} style={input}>
           {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
         </select>
       </label>
-
       {mode === 'single' && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
@@ -2582,24 +2602,41 @@ async function computeReportFor(student, examId, cache = {}) {
               {loading ? 'Computing...' : 'Generate Preview'}
             </button>
           </div>
-
           {report && (
             <>
               <div style={{ marginBottom: 16 }}>
                 <label style={fieldLabel}>Principal's Comments
-                  <textarea value={principalComment} onChange={(e) => setPrincipalComment(e.target.value)} rows={2} style={{ ...input, minWidth: '100%' }} />
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <textarea value={principalComment} onChange={(e) => setPrincipalComment(e.target.value)} rows={2} style={{ ...input, minWidth: '100%', flex: 1 }} />
+                    <button
+                      onClick={handleGeneratePrincipalComment}
+                      disabled={generatingPrincipal}
+                      title="Generate with AI (optional)"
+                      style={{ ...secondaryBtn, height: 'fit-content', flexShrink: 0 }}
+                    >
+                      {generatingPrincipal ? '…' : '✨ Generate'}
+                    </button>
+                  </div>
                 </label>
                 <label style={fieldLabel}>Class Teacher's Comments
-                  <textarea value={classTeacherComment} onChange={(e) => setClassTeacherComment(e.target.value)} rows={2} style={{ ...input, minWidth: '100%' }} />
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <textarea value={classTeacherComment} onChange={(e) => setClassTeacherComment(e.target.value)} rows={2} style={{ ...input, minWidth: '100%', flex: 1 }} />
+                    <button
+                      onClick={handleGenerateTeacherComment}
+                      disabled={generatingTeacher}
+                      title="Generate with AI (optional)"
+                      style={{ ...secondaryBtn, height: 'fit-content', flexShrink: 0 }}
+                    >
+                      {generatingTeacher ? '…' : '✨ Generate'}
+                    </button>
+                  </div>
                 </label>
               </div>
-
               <div
                 id="report-preview"
                 style={{ background: '#fff', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 'clamp(12px, 4vw, 24px)', marginBottom: 12, overflowX: 'auto' }}
                 dangerouslySetInnerHTML={{ __html: buildReportHtml({ ...report, principalComment, classTeacherComment }) }}
               />
-
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg}</span>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -2619,7 +2656,6 @@ async function computeReportFor(student, examId, cache = {}) {
           )}
         </>
       )}
-
       {mode === 'batch' && (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -2641,7 +2677,10 @@ async function computeReportFor(student, examId, cache = {}) {
             </button>
             <button onClick={() => setSelectedBatchIds(new Set())} style={secondaryBtn}>Clear selection</button>
           </div>
-
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: COLORS.muted, marginBottom: 14, cursor: 'pointer' }}>
+            <input type="checkbox" checked={batchGenerateComments} onChange={(e) => setBatchGenerateComments(e.target.checked)} />
+            Also generate AI comments (Principal & Class Teacher) for each student — optional, takes longer for large classes
+          </label>
           <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto', marginBottom: 16 }}>
             <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
               <thead><tr><th style={th}></th><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={th}>Cohort</th></tr></thead>
@@ -2665,14 +2704,12 @@ async function computeReportFor(student, examId, cache = {}) {
               </tbody>
             </table>
           </div>
-
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: COLORS.muted }}>{selectedBatchIds.size} selected</span>
             <button onClick={handleBatchGenerate} disabled={selectedBatchIds.size === 0 || loading} style={btn}>
               {loading ? 'Generating...' : `Generate ${selectedBatchIds.size || ''} Reports`}
             </button>
           </div>
-
           {batchResults.length > 0 && (
             <div style={{ marginTop: 20 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
@@ -2699,10 +2736,13 @@ async function computeReportFor(student, examId, cache = {}) {
                       <td style={td}>{r.student.full_name}</td>
                       <td style={td}>{r.report.aggregate.total}/{r.report.aggregate.maxTotal}</td>
                       <td style={td}>{r.report.position}/{r.report.outOf}</td>
-                      <td style={{ ...td, color: r.ok ? COLORS.good : COLORS.warn }}>{r.ok ? '✓ Saved' : '✕ Failed'}</td>
+                      <td style={{ ...td, color: r.ok ? COLORS.good : COLORS.warn }}>
+                        {r.ok ? '✓ Saved' : '✕ Failed'}
+                        {r.commentError && <div style={{ fontSize: 10.5, color: COLORS.warn }}>Comment generation failed</div>}
+                      </td>
                       <td style={td}>
                         <div style={{ display: 'flex', gap: 10 }}>
-                          <button onClick={() => downloadReportAsPdf(r.report)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                          <button onClick={() => downloadReportAsPdf({ ...r.report, principalComment: r.principalComment, classTeacherComment: r.classTeacherComment })} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                             ⬇ PDF
                           </button>
                           <a href={buildWhatsAppLink(r.student.parent_phone, buildSmsMessage(r.report))} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: COLORS.accent }}>
@@ -2722,7 +2762,6 @@ async function computeReportFor(student, examId, cache = {}) {
     </div>
   )
 }
-
 // ============================================================================
 // ADMIN: Teachers overview — add to nav alongside Dashboard/Students/etc.
 // ============================================================================
