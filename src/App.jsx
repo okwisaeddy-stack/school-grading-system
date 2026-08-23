@@ -4,6 +4,12 @@ import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import JSZip from 'jszip'
 import { supabase } from './lib/supabaseClient'
+import {
+  generateStudentRemark,
+  isAutomatedRemarksEnabled,
+  setAutomatedRemarksEnabled,
+  getAutomatedRemarksCount,
+} from './lib/gemini'
 
 // ============================================================================
 // Helpers
@@ -256,7 +262,7 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals']
+  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
@@ -1589,16 +1595,18 @@ function MarksEntryContent({ teacherId }) {
   const [selectedExamId, setSelectedExamId] = useState('')
   const [students, setStudents] = useState([])
   const [marksByStudent, setMarksByStudent] = useState({})
+  const [prevMarksByStudent, setPrevMarksByStudent] = useState({})
   const [drafts, setDrafts] = useState({})
   const [remarkDrafts, setRemarkDrafts] = useState({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
+  const [generatingIds, setGeneratingIds] = useState(new Set())
+  const [bulkGenerating, setBulkGenerating] = useState(false)
+  const [remarkBulkMsg, setRemarkBulkMsg] = useState('')
   const isNarrow = useIsNarrow()
-
   useEffect(() => { loadAssignmentsAndExams() }, [teacherId])
   useEffect(() => { if (selectedAssignment && selectedExamId) loadStudentsAndMarks() }, [selectedAssignment, selectedExamId])
-
   async function loadAssignmentsAndExams() {
     setLoading(true)
     const [{ data: assignData }, { data: examData }] = await Promise.all([
@@ -1611,21 +1619,17 @@ function MarksEntryContent({ teacherId }) {
     if (examData && examData.length > 0) setSelectedExamId(examData[0].id)
     setLoading(false)
   }
-
   async function loadStudentsAndMarks() {
     setLoading(true)
     const assignment = myAssignments.find((a) => a.id === selectedAssignment)
     if (!assignment) { setLoading(false); return }
-
     const { data: studentData } = await supabase
       .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
     setStudents(studentData || [])
-
     const { data: marksData } = await supabase
       .from('marks').select('*')
       .eq('subject_id', assignment.subject_id)
       .eq('exam_id', selectedExamId)
-
     const byStudent = {}
     ;(marksData || []).forEach((m) => { byStudent[m.student_id] = m })
     setMarksByStudent(byStudent)
@@ -1633,17 +1637,101 @@ function MarksEntryContent({ teacherId }) {
     const remarkInit = {}
     ;(marksData || []).forEach((m) => { if (m.remark) remarkInit[m.student_id] = m.remark })
     setRemarkDrafts(remarkInit)
+    // Pull the same subject's marks from the exam immediately before this
+    // one, so generated remarks can reference "previous performance".
+    const currentExamObj = exams.find((e) => e.id === selectedExamId)
+    const prevExam = currentExamObj
+      ? exams.filter((e) => e.order_index < currentExamObj.order_index).sort((a, b) => b.order_index - a.order_index)[0]
+      : null
+    let prevByStudent = {}
+    if (prevExam) {
+      const { data: prevMarksData } = await supabase
+        .from('marks').select('*')
+        .eq('subject_id', assignment.subject_id)
+        .eq('exam_id', prevExam.id)
+      ;(prevMarksData || []).forEach((m) => { prevByStudent[m.student_id] = m })
+    }
+    setPrevMarksByStudent(prevByStudent)
     setLoading(false)
   }
-
   function updateDraft(studentId, value) {
     setDrafts((prev) => ({ ...prev, [studentId]: value }))
   }
-
   function updateRemarkDraft(studentId, value) {
     setRemarkDrafts((prev) => ({ ...prev, [studentId]: value }))
   }
-
+  function currentScoreFor(studentId) {
+    const draft = drafts[studentId]
+    if (draft !== undefined && draft !== '') return draft
+    return marksByStudent[studentId]?.score
+  }
+  // Core call, no alerting — used by both the single button and bulk run
+  // so bulk can collect failures instead of popping N alerts.
+  async function runGenerate(studentId) {
+    const student = students.find((s) => s.id === studentId)
+    const assignment = myAssignments.find((a) => a.id === selectedAssignment)
+    const subjectName = assignment?.subjects?.name || 'Subject'
+    const score = currentScoreFor(studentId)
+    const prevScore = prevMarksByStudent[studentId]?.score
+    const currentGrades = score !== undefined && score !== null && score !== ''
+      ? [{ name: subjectName, score }] : []
+    const previousGrades = prevScore !== undefined && prevScore !== null
+      ? [{ name: subjectName, score: prevScore }] : []
+    const remark = await generateStudentRemark(student, currentGrades, previousGrades)
+    updateRemarkDraft(studentId, remark)
+  }
+  async function generateRemarkFor(studentId) {
+    setGeneratingIds((prev) => new Set(prev).add(studentId))
+    try {
+      await runGenerate(studentId)
+    } catch (err) {
+      const name = students.find((s) => s.id === studentId)?.full_name || 'this student'
+      alert(`Couldn't generate a remark for ${name}: ${err.message}`)
+    } finally {
+      setGeneratingIds((prev) => { const next = new Set(prev); next.delete(studentId); return next })
+    }
+  }
+  async function generateAllRemarks() {
+    const targets = students
+      .filter((s) => {
+        const score = currentScoreFor(s.id)
+        return score !== undefined && score !== null && score !== ''
+      })
+      .map((s) => s.id)
+    if (targets.length === 0) {
+      setRemarkBulkMsg('No students have a score entered yet — nothing to summarize.')
+      return
+    }
+    setBulkGenerating(true)
+    setRemarkBulkMsg('')
+    setGeneratingIds(new Set(targets))
+    let ok = 0
+    let failed = 0
+    let lastError = ''
+    const CONCURRENCY = 3 // gentler on the Gemini API than the DB batch size elsewhere
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const batch = targets.slice(i, i + CONCURRENCY)
+      const results = await Promise.all(batch.map(async (id) => {
+        try {
+          await runGenerate(id)
+          return { ok: true }
+        } catch (err) {
+          return { ok: false, error: err.message }
+        }
+      }))
+      results.forEach((r) => {
+        if (r.ok) ok++
+        else { failed++; lastError = r.error }
+      })
+    }
+    setGeneratingIds(new Set())
+    setBulkGenerating(false)
+    setRemarkBulkMsg(
+      failed === 0
+        ? `Generated ${ok} remark${ok === 1 ? '' : 's'}.`
+        : `Generated ${ok}, ${failed} failed (${lastError}). Remaining students unaffected.`
+    )
+  }
   async function saveAll() {
     setSaving(true)
     setSavedMsg('')
@@ -1658,9 +1746,7 @@ function MarksEntryContent({ teacherId }) {
         remark: remarkDrafts[studentId] || null,
         entered_by: teacherId,
       }))
-
     if (rows.length === 0) { setSaving(false); return }
-
     const { error } = await supabase.from('marks').upsert(rows, { onConflict: 'student_id,subject_id,exam_id' })
     if (!error) {
       setSavedMsg(`Saved ${rows.length} mark${rows.length === 1 ? '' : 's'} at ${new Date().toLocaleTimeString()}`)
@@ -1668,17 +1754,14 @@ function MarksEntryContent({ teacherId }) {
     }
     setSaving(false)
   }
-
   const assignment = myAssignments.find((a) => a.id === selectedAssignment)
   const enteredCount = students.filter((s) => marksByStudent[s.id] || drafts[s.id] !== undefined).length
-
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
         <h2>Marks Entry</h2>
         <button onClick={() => setShowManage(true)} style={secondaryBtn}>+ Add another subject/class</button>
       </div>
-
       {myAssignments.length === 0 ? (
         <p style={{ color: COLORS.muted }}>No subjects assigned yet.</p>
       ) : (
@@ -1700,7 +1783,12 @@ function MarksEntryContent({ teacherId }) {
               {enteredCount} / {students.length} entered
             </div>
           </div>
-
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 12, color: COLORS.muted }}>{remarkBulkMsg}</span>
+            <button onClick={generateAllRemarks} disabled={bulkGenerating || students.length === 0} style={secondaryBtn}>
+              {bulkGenerating ? 'Generating remarks...' : '✨ Generate All Remarks'}
+            </button>
+          </div>
           {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
             // ---- Card layout for phones ----
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1708,6 +1796,7 @@ function MarksEntryContent({ teacherId }) {
                 const existing = marksByStudent[s.id]
                 const draft = drafts[s.id]
                 const hasValue = draft !== undefined ? draft !== '' : !!existing
+                const isGenerating = generatingIds.has(s.id)
                 return (
                   <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
@@ -1729,12 +1818,22 @@ function MarksEntryContent({ teacherId }) {
                         />
                       </label>
                       <label style={{ ...fieldLabel, flex: 1 }}>Remark
-                        <input
-                          type="text" placeholder="Optional…"
-                          defaultValue={existing ? existing.remark || '' : ''}
-                          onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
-                          style={{ width: '100%', padding: '8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
-                        />
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <input
+                            type="text" placeholder="Optional…"
+                            value={remarkDrafts[s.id] ?? (existing ? existing.remark || '' : '')}
+                            onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
+                            style={{ flex: 1, padding: '8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
+                          />
+                          <button
+                            onClick={() => generateRemarkFor(s.id)}
+                            disabled={isGenerating || bulkGenerating}
+                            title="Generate remark"
+                            style={{ ...secondaryBtn, padding: '0 10px', flexShrink: 0 }}
+                          >
+                            {isGenerating ? '…' : '✨'}
+                          </button>
+                        </div>
                       </label>
                     </div>
                   </div>
@@ -1756,6 +1855,7 @@ function MarksEntryContent({ teacherId }) {
                     const existing = marksByStudent[s.id]
                     const draft = drafts[s.id]
                     const hasValue = draft !== undefined ? draft !== '' : !!existing
+                    const isGenerating = generatingIds.has(s.id)
                     return (
                       <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                         <td style={td}>{s.full_name}</td>
@@ -1769,12 +1869,22 @@ function MarksEntryContent({ teacherId }) {
                           />
                         </td>
                         <td style={td}>
-                          <input
-                            type="text" placeholder="Optional remark…"
-                            defaultValue={existing ? existing.remark || '' : ''}
-                            onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
-                            style={{ width: '100%', minWidth: 140, padding: '6px 8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
-                          />
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <input
+                              type="text" placeholder="Optional remark…"
+                              value={remarkDrafts[s.id] ?? (existing ? existing.remark || '' : '')}
+                              onChange={(e) => updateRemarkDraft(s.id, e.target.value)}
+                              style={{ width: '100%', minWidth: 140, padding: '6px 8px', border: `1px solid ${COLORS.rule}`, borderRadius: 4, boxSizing: 'border-box' }}
+                            />
+                            <button
+                              onClick={() => generateRemarkFor(s.id)}
+                              disabled={isGenerating || bulkGenerating}
+                              title="Generate remark"
+                              style={{ ...secondaryBtn, padding: '4px 10px', flexShrink: 0 }}
+                            >
+                              {isGenerating ? '…' : '✨'}
+                            </button>
+                          </div>
                         </td>
                         <td style={{ ...td, textAlign: 'center' }}>
                           <span style={{ fontSize: 11, fontWeight: 700, color: hasValue ? COLORS.good : COLORS.warn }}>
@@ -1791,7 +1901,6 @@ function MarksEntryContent({ teacherId }) {
               </table>
             </div>
           )}
-
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
             <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg || 'Unsaved changes are only committed once you save.'}</span>
             <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
