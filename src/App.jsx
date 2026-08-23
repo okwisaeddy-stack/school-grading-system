@@ -2312,7 +2312,7 @@ function printAllReports(results) {
   const container = document.createElement('div')
   container.id = 'print-all-container'
   container.innerHTML = results
-    .map((r) => `<div style="page-break-after: always; padding: 24px; font-family: sans-serif;">${buildReportHtml(r.report)}</div>`)
+    .map((r) => `<div style="page-break-after: always; padding: 0; font-family: sans-serif; zoom: 0.8;">${buildReportHtml(r.report)}</div>`)
     .join('')
 
   const style = document.createElement('style')
@@ -2329,6 +2329,31 @@ function printAllReports(results) {
 
   window.print()
 
+  const cleanup = () => {
+    document.body.removeChild(container)
+    document.head.removeChild(style)
+    window.removeEventListener('afterprint', cleanup)
+  }
+  window.addEventListener('afterprint', cleanup)
+}
+function printSingleReport(report) {
+  const container = document.createElement('div')
+  container.id = 'print-single-container'
+  container.innerHTML = buildReportHtml(report)
+  const style = document.createElement('style')
+  style.id = 'print-single-style'
+  style.innerHTML = `
+    @page { size: A4; margin: 8mm; }
+    @media print {
+      body > *:not(#print-single-container) { display: none !important; }
+      #print-single-container { display: block !important; padding: 0 !important; }
+      #print-single-container > div { zoom: 0.8; }
+    }
+    @media screen { #print-single-container { display: none; } }
+  `
+  document.head.appendChild(style)
+  document.body.appendChild(container)
+  window.print()
   const cleanup = () => {
     document.body.removeChild(container)
     document.head.removeChild(style)
@@ -2648,7 +2673,7 @@ async function computeReportFor(student, examId, cache = {}) {
                     💬 WhatsApp Parent
                   </a>
                   <button onClick={handleDownloadPdf} style={secondaryBtn}>⬇ Download PDF</button>
-                  <button onClick={() => window.print()} style={secondaryBtn}>🖨 Print</button>
+                  <button onClick={() => printSingleReport({ ...report, principalComment, classTeacherComment })} style={secondaryBtn}>🖨 Print</button>
                   <button onClick={handleSaveSingle} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save Report'}</button>
                 </div>
               </div>
