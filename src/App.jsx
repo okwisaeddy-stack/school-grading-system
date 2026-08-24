@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, createContext, useContext, useCallback } from 'react'
 import Papa from 'papaparse'
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
@@ -55,6 +55,90 @@ const sectionLabel = { fontSize: 12, color: COLORS.muted, fontWeight: 700, textT
 const pillStatic = { padding: '5px 12px', borderRadius: 14, fontSize: 12, fontWeight: 600, background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}` }
 function pillBtn(active) {
   return { padding: '5px 12px', borderRadius: 14, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: active ? COLORS.band : COLORS.paper, color: active ? '#fff' : COLORS.ink, border: `1px solid ${active ? COLORS.band : COLORS.ruleLight}` }
+}
+
+// ============================================================================
+// NOTIFICATIONS — app-themed toasts & confirm modal, replacing window.alert/confirm
+// ============================================================================
+const NotificationContext = createContext(null)
+
+function useNotify() {
+  const ctx = useContext(NotificationContext)
+  if (!ctx) {
+    // Fallback so this never hard-crashes if a component renders outside the provider
+    return { notify: () => {}, confirmAction: () => Promise.resolve(true) }
+  }
+  return ctx
+}
+
+function NotificationProvider({ children }) {
+  const [toasts, setToasts] = useState([])
+  const [confirmState, setConfirmState] = useState(null) // { message, resolve }
+
+  const notify = useCallback((message, type = 'success') => {
+    const id = `${Date.now()}-${Math.random()}`
+    setToasts((prev) => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id))
+    }, 4200)
+  }, [])
+
+  const dismissToast = useCallback((id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  const confirmAction = useCallback((message, opts = {}) => {
+    return new Promise((resolve) => {
+      setConfirmState({ message, resolve, ...opts })
+    })
+  }, [])
+
+  function resolveConfirm(result) {
+    confirmState?.resolve(result)
+    setConfirmState(null)
+  }
+
+  return (
+    <NotificationContext.Provider value={{ notify, confirmAction }}>
+      {children}
+      <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 300, display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 'min(360px, 90vw)' }}>
+        {toasts.map((t) => {
+          const isError = t.type === 'error'
+          return (
+            <div
+              key={t.id}
+              onClick={() => dismissToast(t.id)}
+              style={{
+                padding: '12px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                background: isError ? COLORS.warnSoft : COLORS.goodSoft,
+                color: isError ? COLORS.warn : COLORS.good,
+                border: `1px solid ${isError ? COLORS.warn : COLORS.good}`,
+                boxShadow: '0 6px 18px rgba(30,42,36,0.16)',
+              }}
+            >
+              {t.message}
+            </div>
+          )
+        })}
+      </div>
+      {confirmState && (
+        <div style={modalOverlay}>
+          <div style={{ ...modalCard, maxWidth: 380 }}>
+            <p style={{ fontSize: 14, color: COLORS.ink, lineHeight: 1.5, marginBottom: 22 }}>{confirmState.message}</p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button onClick={() => resolveConfirm(false)} style={secondaryBtn}>{confirmState.cancelLabel || 'Cancel'}</button>
+              <button
+                onClick={() => resolveConfirm(true)}
+                style={confirmState.danger ? { ...btn, background: COLORS.warn } : btn}
+              >
+                {confirmState.confirmLabel || 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </NotificationContext.Provider>
+  )
 }
 
 // ============================================================================
@@ -382,7 +466,7 @@ function DashboardScreen({ onNavigate }) {
       supabase.from('students').select('*', { count: 'exact', head: true }),
       supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       supabase.from('exams').select('*', { count: 'exact', head: true }),
-      supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('role', 'teacher').eq('status', 'approved'),
+      supabase.from('profiles').select('*', { count: 'exact', head: true }).in('role', ['teacher', 'admin']).eq('status', 'approved'),
     ])
     setCounts({ students: studentCount ?? 0, pending: pendingCount ?? 0, exams: examCount ?? 0, teachers: teacherCount ?? 0 })
     setLoading(false)
@@ -409,6 +493,7 @@ function DashboardScreen({ onNavigate }) {
 // APPROVALS
 // ============================================================================
 function ApprovalsScreen({ currentUserId }) {
+  const { notify } = useNotify()
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(true)
   const [actioningId, setActioningId] = useState(null)
@@ -432,13 +517,14 @@ function ApprovalsScreen({ currentUserId }) {
         .from('profiles').select('*', { count: 'exact', head: true })
         .eq('role', 'admin').eq('title', person.title).eq('status', 'approved')
       if ((count ?? 0) >= limit) {
-        alert(`Can't approve — ${person.title} already has the maximum of ${limit} approved. Reject this request or remove/reassign the existing one first.`)
+        notify(`Can't approve — ${person.title} already has the maximum of ${limit} approved. Reject this request or remove/reassign the existing one first.`, 'error')
         return
       }
     }
     setActioningId(id)
     await supabase.from('profiles').update({ status: 'approved', approved_by: currentUserId, approved_at: new Date().toISOString() }).eq('id', id)
     setActioningId(null)
+    notify(`${person?.full_name || 'Staff member'} approved.`)
     loadPending()
   }
 
@@ -446,6 +532,7 @@ function ApprovalsScreen({ currentUserId }) {
     setActioningId(id)
     await supabase.from('profiles').update({ status: 'rejected', approved_by: currentUserId, approved_at: new Date().toISOString() }).eq('id', id)
     setActioningId(null)
+    notify('Request rejected.')
     loadPending()
   }
 
@@ -930,11 +1017,12 @@ function BulkImportModal({ onClose, onImported, allSubjects }) {
 
 
 // ============================================================================
-// ADMIN: Edit Student modal (core fields only — subject enrollment editing
-// is not covered here to keep scope contained; delete + re-add if a
-// student's whole subject combination needs to change)
+// ADMIN: Edit Student modal — core fields plus enrolled-subject editing
+// (compulsory + electives, exclusion rules enforced, without deleting the
+// student record).
 // ============================================================================
-function EditStudentModal({ student, onClose, onSaved }) {
+function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
+  const { notify } = useNotify()
   const [fullName, setFullName] = useState(student.full_name)
   const [admissionNo, setAdmissionNo] = useState(student.admission_no)
   const [entranceScore, setEntranceScore] = useState(student.entrance_score ?? '')
@@ -943,11 +1031,60 @@ function EditStudentModal({ student, onClose, onSaved }) {
   const [parentPhone, setParentPhone] = useState(student.parent_phone ?? '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [blockedMsg, setBlockedMsg] = useState('')
+
+  const isForm34 = student.cohort === 'form_3' || student.cohort === 'form_4'
+  const isGrade10 = student.cohort === 'grade_10'
+
+  const [loadingSubjects, setLoadingSubjects] = useState(isForm34 || isGrade10)
+  const [electives, setElectives] = useState([]) // form 3/4: extra electives beyond the one-of-group
+  const [oneOfChoice, setOneOfChoice] = useState('') // form 3/4: Computer Studies / Business Studies / Agriculture
+  const [grade10Electives, setGrade10Electives] = useState([])
+
+  useEffect(() => {
+    if (!isForm34 && !isGrade10) return
+    setLoadingSubjects(true)
+    supabase.from('student_subjects').select('subject_id, is_compulsory, subjects(name)').eq('student_id', student.id)
+      .then(({ data }) => {
+        const rows = data || []
+        const nonCompulsoryNames = rows.filter((r) => !r.is_compulsory).map((r) => r.subjects?.name).filter(Boolean)
+        if (isForm34) {
+          const existingOneOf = nonCompulsoryNames.find((n) => ONE_OF_GROUP.includes(n))
+          setOneOfChoice(existingOneOf || '')
+          setElectives(nonCompulsoryNames.filter((n) => !ONE_OF_GROUP.includes(n)))
+        } else {
+          setGrade10Electives(nonCompulsoryNames.filter((n) => GRADE10_ELECTIVE_MENU.includes(n)))
+        }
+        setLoadingSubjects(false)
+      })
+  }, [student.id])
+
+  function toggleElective(subject) {
+    if (electives.includes(subject)) {
+      setElectives(electives.filter((s) => s !== subject))
+      setBlockedMsg('')
+      return
+    }
+    if (isExcludedTogether(electives, subject)) {
+      const pair = EXCLUSION_PAIRS.find(([a, b]) => a === subject || b === subject)
+      const conflict = pair.find((s) => s !== subject)
+      setBlockedMsg(`Can't add ${subject} — already taking ${conflict}.`)
+      return
+    }
+    setElectives([...electives, subject])
+    setBlockedMsg('')
+  }
+
+  function toggleGrade10Elective(subject) {
+    setGrade10Electives((prev) => (prev.includes(subject) ? prev.filter((s) => s !== subject) : [...prev, subject]))
+  }
+
+  const canSave = fullName.trim() && admissionNo.trim() && (!isForm34 || (electives.length > 0 && oneOfChoice))
 
   async function handleSave() {
     setSaving(true)
     setError('')
-    const { error } = await supabase.from('students').update({
+    const { error: studentError } = await supabase.from('students').update({
       full_name: fullName.trim(),
       admission_no: admissionNo.trim(),
       entrance_score: entranceScore === '' ? null : Number(entranceScore),
@@ -955,21 +1092,45 @@ function EditStudentModal({ student, onClose, onSaved }) {
       parent_name: parentName.trim() || null,
       parent_phone: parentPhone.trim() || null,
     }).eq('id', student.id)
-    if (error) { setError(error.message); setSaving(false); return }
+    if (studentError) { setError(studentError.message); setSaving(false); return }
+
+    if (isForm34 || isGrade10) {
+      const subjectByName = Object.fromEntries((allSubjects || []).map((s) => [s.name, s.id]))
+      const rows = isForm34
+        ? [
+            ...COMPULSORY_84.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: true })),
+            ...electives.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: false })),
+            { student_id: student.id, subject_id: subjectByName[oneOfChoice], is_compulsory: false },
+          ]
+        : [
+            ...GRADE10_COMPULSORY.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: true })),
+            ...grade10Electives.map((name) => ({ student_id: student.id, subject_id: subjectByName[name], is_compulsory: false })),
+          ]
+      const validRows = rows.filter((r) => r.subject_id)
+
+      const { error: deleteError } = await supabase.from('student_subjects').delete().eq('student_id', student.id)
+      if (deleteError) { setError(deleteError.message); setSaving(false); return }
+      if (validRows.length > 0) {
+        const { error: insertError } = await supabase.from('student_subjects').insert(validRows)
+        if (insertError) { setError(insertError.message); setSaving(false); return }
+      }
+    }
+
     setSaving(false)
+    notify(`${fullName.trim()} updated.`)
     onSaved()
     onClose()
   }
 
   return (
     <div style={modalOverlay}>
-      <div style={{ ...modalCard, maxWidth: 'min(460px, 94vw)' }}>
+      <div style={{ ...modalCard, maxWidth: 'min(520px, 94vw)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
           <h3>Edit Student</h3>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
         </div>
         <p style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 14 }}>
-          Cohort and subjects can't be changed here — delete and re-add the student if those need to change.
+          Cohort can't be changed here — delete and re-add the student if that needs to change.
         </p>
         <label style={fieldLabel}>Full name
           <input value={fullName} onChange={(e) => setFullName(e.target.value)} style={input} />
@@ -991,10 +1152,53 @@ function EditStudentModal({ student, onClose, onSaved }) {
         <label style={fieldLabel}>Parent phone
           <input value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} style={input} />
         </label>
+
+        {(isForm34 || isGrade10) && (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.ruleLight}` }}>
+            <div style={sectionLabel}>Enrolled Subjects</div>
+            {loadingSubjects ? (
+              <p style={{ fontSize: 12.5, color: COLORS.muted }}>Loading current subjects...</p>
+            ) : isForm34 ? (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                  {COMPULSORY_84.map((s) => <span key={s} style={pillStatic}>{s}</span>)}
+                </div>
+                <label style={fieldLabel}>One of Computer Studies / Business Studies / Agriculture
+                  <select value={oneOfChoice} onChange={(e) => setOneOfChoice(e.target.value)} style={input}>
+                    <option value="">Select…</option>
+                    {ONE_OF_GROUP.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+                <div style={fieldLabel}>Electives
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {['Physics', 'Biology', 'Chemistry', 'Geography', 'History', 'CRE', 'French', 'German'].map((s) => (
+                      <span key={s} onClick={() => toggleElective(s)} style={pillBtn(electives.includes(s))}>{s}</span>
+                    ))}
+                  </div>
+                </div>
+                {blockedMsg && <p style={{ ...errorText, marginTop: 6 }}>{blockedMsg}</p>}
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                  {GRADE10_COMPULSORY.map((s) => <span key={s} style={pillStatic}>{s}</span>)}
+                </div>
+                <div style={fieldLabel}>Electives
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                    {GRADE10_ELECTIVE_MENU.map((s) => (
+                      <span key={s} onClick={() => toggleGrade10Elective(s)} style={pillBtn(grade10Electives.includes(s))}>{s}</span>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {error && <p style={errorText}>{error}</p>}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
           <button onClick={onClose} style={secondaryBtn}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save Changes'}</button>
+          <button onClick={handleSave} disabled={saving || !canSave} style={btn}>{saving ? 'Saving...' : 'Save Changes'}</button>
         </div>
       </div>
     </div>
@@ -1005,7 +1209,9 @@ function EditStudentModal({ student, onClose, onSaved }) {
 // STUDENTS SCREEN
 // ============================================================================
 function StudentsScreen() {
+  const { notify, confirmAction } = useNotify()
   const [students, setStudents] = useState([])
+  const [subjectsByStudent, setSubjectsByStudent] = useState({}) // { studentId: [subjectName, ...] }
   const [allSubjects, setAllSubjects] = useState([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
@@ -1013,6 +1219,7 @@ function StudentsScreen() {
   const [editingStudent, setEditingStudent] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
   const [cohortFilter, setCohortFilter] = useState('all')
+  const [searchQuery, setSearchQuery] = useState('')
   const isNarrow = useIsNarrow()
 
   const cohortOptions = [
@@ -1034,16 +1241,49 @@ function StudentsScreen() {
       query = query.eq('cohort', cohortFilter)
     }
     const { data } = await query
-    setStudents(data || [])
+    const list = data || []
+    setStudents(list)
     setLoading(false)
+
+    if (list.length > 0) {
+      const { data: subjectRows } = await supabase
+        .from('student_subjects').select('student_id, subjects(name)').in('student_id', list.map((s) => s.id))
+      const grouped = {}
+      ;(subjectRows || []).forEach((r) => {
+        if (!r.subjects?.name) return
+        if (!grouped[r.student_id]) grouped[r.student_id] = []
+        grouped[r.student_id].push(r.subjects.name)
+      })
+      setSubjectsByStudent(grouped)
+    } else {
+      setSubjectsByStudent({})
+    }
   }
 
-  async function handleDelete(id) {
-    if (!window.confirm('Delete this student? This also removes their marks, subjects, and report history. This cannot be undone.')) return
+  async function handleDelete(id, name) {
+    const confirmed = await confirmAction(`Delete ${name || 'this student'}? This also removes their marks, subjects, and report history. This cannot be undone.`, { danger: true, confirmLabel: 'Delete' })
+    if (!confirmed) return
     setDeletingId(id)
     await supabase.from('students').delete().eq('id', id)
     setDeletingId(null)
+    notify(`${name || 'Student'} deleted.`)
     loadStudents()
+  }
+
+  const filteredStudents = students.filter((s) => {
+    if (!searchQuery.trim()) return true
+    const q = searchQuery.trim().toLowerCase()
+    return s.full_name?.toLowerCase().includes(q) || s.admission_no?.toLowerCase().includes(q)
+  })
+
+  function SubjectTags({ studentId }) {
+    const names = subjectsByStudent[studentId] || []
+    if (names.length === 0) return <span style={{ color: COLORS.muted, fontSize: 12 }}>—</span>
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {names.map((n) => <span key={n} style={{ ...pillStatic, padding: '2px 9px', fontSize: 11 }}>{n}</span>)}
+      </div>
+    )
   }
 
   return (
@@ -1051,7 +1291,7 @@ function StudentsScreen() {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <h2>Students</h2>
-          <p style={{ color: COLORS.muted, fontSize: 13, margin: 0 }}>{students.length} students in the system.</p>
+          <p style={{ color: COLORS.muted, fontSize: 13, margin: 0 }}>{filteredStudents.length} of {students.length} students shown.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={() => setShowImport(true)} style={secondaryBtn}>Bulk import CSV</button>
@@ -1059,16 +1299,26 @@ function StudentsScreen() {
         </div>
       </div>
 
-      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
-        <select value={cohortFilter} onChange={(e) => setCohortFilter(e.target.value)} style={input}>
-          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-        </select>
-      </label>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+        <label style={{ ...fieldLabel, maxWidth: 220 }}>Class
+          <select value={cohortFilter} onChange={(e) => setCohortFilter(e.target.value)} style={input}>
+            {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={{ ...fieldLabel, flex: 1, minWidth: 200 }}>Search
+          <input
+            placeholder="Search by name or admission no..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={input}
+          />
+        </label>
+      </div>
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : isNarrow ? (
         // ---- Card layout for phones: no horizontal scrolling needed ----
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {students.map((s) => (
+          {filteredStudents.map((s) => (
             <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{s.full_name}</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 12.5, marginBottom: 10 }}>
@@ -1078,45 +1328,50 @@ function StudentsScreen() {
                   <span style={{ color: COLORS.muted }}>Entrance</span><br/>
                   {s.entrance_type ? `${s.entrance_score}/${s.entrance_max}` : '—'}
                 </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <span style={{ color: COLORS.muted }}>Subjects</span><br/>
+                  <div style={{ marginTop: 4 }}><SubjectTags studentId={s.id} /></div>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: 16, borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 8 }}>
                 <button onClick={() => setEditingStudent(s)} style={{ fontSize: 12.5, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>Edit</button>
-                <button onClick={() => handleDelete(s.id)} disabled={deletingId === s.id} style={{ fontSize: 12.5, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
+                <button onClick={() => handleDelete(s.id, s.full_name)} disabled={deletingId === s.id} style={{ fontSize: 12.5, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
                   {deletingId === s.id ? 'Deleting...' : 'Delete'}
                 </button>
               </div>
             </div>
           ))}
-          {students.length === 0 && (
+          {filteredStudents.length === 0 && (
             <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
-              No students yet.
+              No students match.
             </div>
           )}
         </div>
       ) : (
         // ---- Table layout for desktop ----
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
-          <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-            <thead><tr><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={th}>Cohort</th><th style={th}>Entrance</th><th style={th}></th></tr></thead>
+          <table style={{ width: '100%', minWidth: 640, borderCollapse: 'collapse' }}>
+            <thead><tr><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={th}>Cohort</th><th style={th}>Subjects</th><th style={th}>Entrance</th><th style={th}></th></tr></thead>
             <tbody>
-              {students.map((s) => (
+              {filteredStudents.map((s) => (
                 <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                   <td style={td}>{s.full_name}</td>
                   <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
                   <td style={td}>{s.cohort}{s.pathway ? ` · ${s.pathway}` : ''}</td>
+                  <td style={{ ...td, maxWidth: 260 }}><SubjectTags studentId={s.id} /></td>
                   <td style={{ ...td, color: COLORS.muted }}>{s.entrance_type ? `${s.entrance_score}/${s.entrance_max}` : '—'}</td>
                   <td style={{ ...td, textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
                       <button onClick={() => setEditingStudent(s)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Edit</button>
-                      <button onClick={() => handleDelete(s.id)} disabled={deletingId === s.id} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      <button onClick={() => handleDelete(s.id, s.full_name)} disabled={deletingId === s.id} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                         {deletingId === s.id ? 'Deleting...' : 'Delete'}
                       </button>
                     </div>
                   </td>
                 </tr>
               ))}
-              {students.length === 0 && (
-                <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students yet.</td></tr>
+              {filteredStudents.length === 0 && (
+                <tr><td colSpan={6} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students match.</td></tr>
               )}
             </tbody>
           </table>
@@ -1125,7 +1380,7 @@ function StudentsScreen() {
 
       {showAdd && <AddStudentModal onClose={() => setShowAdd(false)} onSaved={loadStudents} />}
       {showImport && <BulkImportModal onClose={() => setShowImport(false)} onImported={loadStudents} allSubjects={allSubjects} />}
-      {editingStudent && <EditStudentModal student={editingStudent} onClose={() => setEditingStudent(null)} onSaved={loadStudents} />}
+      {editingStudent && <EditStudentModal student={editingStudent} allSubjects={allSubjects} onClose={() => setEditingStudent(null)} onSaved={loadStudents} />}
     </div>
   )
 }
@@ -1141,9 +1396,11 @@ function ExamMarksOverview({ exam, onBack }) {
   const [cohort, setCohort] = useState('form_4')
   const [students, setStudents] = useState([])
   const [subjectColumns, setSubjectColumns] = useState([])
+  const [studentSubjects, setStudentSubjects] = useState({}) // { studentId: [{id, name}, ...] } — this student's own enrollment
   const [marksGrid, setMarksGrid] = useState({}) // { studentId: { subjectId: score } }
   const [rankings, setRankings] = useState({}) // { studentId: { rnk, total_points, max_points } }
   const [loading, setLoading] = useState(true)
+  const [viewingStudent, setViewingStudent] = useState(null)
   const isNarrow = useIsNarrow()
 
   const cohortOptions = [
@@ -1151,6 +1408,7 @@ function ExamMarksOverview({ exam, onBack }) {
     { value: 'form_4', label: 'Form 4' },
     { value: 'grade_10', label: 'Grade 10' },
   ]
+  const isGrade10 = cohort === 'grade_10'
 
   useEffect(() => { loadOverview() }, [cohort])
 
@@ -1162,6 +1420,7 @@ function ExamMarksOverview({ exam, onBack }) {
 
     if (studentIds.length === 0) {
       setSubjectColumns([])
+      setStudentSubjects({})
       setMarksGrid({})
       setRankings({})
       setLoading(false)
@@ -1169,11 +1428,19 @@ function ExamMarksOverview({ exam, onBack }) {
     }
 
     const { data: enrollments } = await supabase
-      .from('student_subjects').select('subject_id, subjects(id, name)').in('student_id', studentIds)
+      .from('student_subjects').select('student_id, subject_id, subjects(id, name)').in('student_id', studentIds)
     const subjectMap = {}
-    ;(enrollments || []).forEach((e) => { if (e.subjects) subjectMap[e.subjects.id] = e.subjects.name })
+    const perStudent = {}
+    ;(enrollments || []).forEach((e) => {
+      if (!e.subjects) return
+      subjectMap[e.subjects.id] = e.subjects.name
+      if (!perStudent[e.student_id]) perStudent[e.student_id] = []
+      perStudent[e.student_id].push({ id: e.subjects.id, name: e.subjects.name })
+    })
     const columns = Object.entries(subjectMap).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
     setSubjectColumns(columns)
+    Object.values(perStudent).forEach((list) => list.sort((a, b) => a.name.localeCompare(b.name)))
+    setStudentSubjects(perStudent)
 
     const { data: marksData } = await supabase
       .from('marks').select('student_id, subject_id, score').eq('exam_id', exam.id).in('student_id', studentIds)
@@ -1207,6 +1474,42 @@ function ExamMarksOverview({ exam, onBack }) {
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : students.length === 0 ? (
         <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
           No students in this cohort yet.
+        </div>
+      ) : isGrade10 ? (
+        // ---- Grade 10 CBC: compact summary list, per-student subjects vary ----
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ background: COLORS.paper }}>
+                <th style={th}>Student Name</th>
+                <th style={th}>Adm No</th>
+                <th style={{ ...th, textAlign: 'center' }}>Total Subjects Taken</th>
+                <th style={{ ...th, textAlign: 'center' }}>Total Points/Max</th>
+                <th style={{ ...th, textAlign: 'center' }}>Position</th>
+                <th style={th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((s) => {
+                const rank = rankings[s.id]
+                const subjects = studentSubjects[s.id] || []
+                return (
+                  <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                    <td style={{ ...td, fontWeight: 600 }}>{s.full_name}</td>
+                    <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
+                    <td style={{ ...td, textAlign: 'center' }}>{subjects.length}</td>
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700 }}>{rank ? `${rank.total_points}/${rank.max_points}` : '—'}</td>
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: COLORS.accent }}>{rank ? rank.rnk : '—'}</td>
+                    <td style={{ ...td, textAlign: 'right' }}>
+                      <button onClick={() => setViewingStudent(s)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
+                        View Marks
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       ) : (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
@@ -1244,6 +1547,45 @@ function ExamMarksOverview({ exam, onBack }) {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {viewingStudent && (
+        <div style={modalOverlay} onClick={() => setViewingStudent(null)}>
+          <div style={{ ...modalCard, maxWidth: 'min(440px, 94vw)' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <h3 style={{ margin: 0 }}>{viewingStudent.full_name}</h3>
+              <button onClick={() => setViewingStudent(null)} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+            <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 16 }}>{viewingStudent.admission_no}</p>
+            <div style={{ border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: COLORS.paper }}>
+                    <th style={th}>Subject</th>
+                    <th style={{ ...th, textAlign: 'center' }}>Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(studentSubjects[viewingStudent.id] || []).map((subj) => (
+                    <tr key={subj.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                      <td style={td}>{subj.name}</td>
+                      <td style={{ ...td, textAlign: 'center' }}>{marksGrid[viewingStudent.id]?.[subj.id] ?? '—'}</td>
+                    </tr>
+                  ))}
+                  {(studentSubjects[viewingStudent.id] || []).length === 0 && (
+                    <tr><td colSpan={2} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No subjects enrolled.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {rankings[viewingStudent.id] && (
+              <div style={{ marginTop: 14, fontSize: 13, display: 'flex', justifyContent: 'space-between' }}>
+                <span><strong>Total:</strong> {rankings[viewingStudent.id].total_points}/{rankings[viewingStudent.id].max_points}</span>
+                <span style={{ color: COLORS.accent, fontWeight: 700 }}>Position {rankings[viewingStudent.id].rnk}</span>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1589,6 +1931,7 @@ function TeacherOnboarding({ teacherId, onDone }) {
 // TEACHER: Marks Entry
 // ============================================================================
 function MarksEntryContent({ teacherId }) {
+  const { notify } = useNotify()
   const [showManage, setShowManage] = useState(false)
   const [myAssignments, setMyAssignments] = useState([])
   const [selectedAssignment, setSelectedAssignment] = useState('')
@@ -1624,8 +1967,24 @@ function MarksEntryContent({ teacherId }) {
     setLoading(true)
     const assignment = myAssignments.find((a) => a.id === selectedAssignment)
     if (!assignment) { setLoading(false); return }
-    const { data: studentData } = await supabase
+    const { data: classStudents } = await supabase
       .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
+    const classStudentIds = (classStudents || []).map((s) => s.id)
+    // Only show students actually enrolled in this subject — not the whole class,
+    // since Grade 10 electives (and even Form 3/4 elective groups) mean not
+    // every student in a class takes every subject. But students who predate
+    // subject-enrollment tracking (or slipped through an import without it)
+    // have NO student_subjects rows at all — for those, we can't tell what
+    // they take, so show them rather than silently hiding the whole class.
+    const { data: allEnrollmentRows } = await supabase
+      .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
+    const enrolledForSubject = new Set(
+      (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
+    )
+    const anyEnrollmentRecord = new Set((allEnrollmentRows || []).map((r) => r.student_id))
+    const studentData = (classStudents || []).filter(
+      (s) => enrolledForSubject.has(s.id) || !anyEnrollmentRecord.has(s.id)
+    )
     setStudents(studentData || [])
     const { data: marksData } = await supabase
       .from('marks').select('*')
@@ -1687,7 +2046,7 @@ function MarksEntryContent({ teacherId }) {
       await runGenerate(studentId)
     } catch (err) {
       const name = students.find((s) => s.id === studentId)?.full_name || 'this student'
-      alert(`Couldn't generate a remark for ${name}: ${err.message}`)
+      notify(`Couldn't generate a remark for ${name}: ${err.message}`, 'error')
     } finally {
       setGeneratingIds((prev) => { const next = new Set(prev); next.delete(studentId); return next })
     }
@@ -2380,6 +2739,7 @@ function buildSmsMessage(report) {
 }
 
   function ReportsScreen() {
+  const { notify } = useNotify()
   const [mode, setMode] = useState('single') // single | batch
   const [batchCohortFilter, setBatchCohortFilter] = useState('form_4')
   const [exams, setExams] = useState([])
@@ -2508,7 +2868,7 @@ async function computeReportFor(student, examId, cache = {}) {
       const comment = await generateReportComment(report.student, report.subjectRows, report.aggregate, report.position, report.outOf, 'principal')
       setPrincipalComment(comment)
     } catch (err) {
-      alert(`Couldn't generate Principal's comment: ${err.message}`)
+      notify(`Couldn't generate Principal's comment: ${err.message}`, 'error')
     } finally {
       setGeneratingPrincipal(false)
     }
@@ -2520,7 +2880,7 @@ async function computeReportFor(student, examId, cache = {}) {
       const comment = await generateReportComment(report.student, report.subjectRows, report.aggregate, report.position, report.outOf, 'teacher')
       setClassTeacherComment(comment)
     } catch (err) {
-      alert(`Couldn't generate Class Teacher's comment: ${err.message}`)
+      notify(`Couldn't generate Class Teacher's comment: ${err.message}`, 'error')
     } finally {
       setGeneratingTeacher(false)
     }
@@ -2790,9 +3150,74 @@ async function computeReportFor(student, examId, cache = {}) {
 // ============================================================================
 // ADMIN: Teachers overview — add to nav alongside Dashboard/Students/etc.
 // ============================================================================
+// ============================================================================
+// ADMIN: Title-based promotion modal — pick Principal / Deputy Principal /
+// Dean of Studies, with slot limits enforced against currently approved admins
+// ============================================================================
+function PromoteToAdminModal({ teacher, teachers, onClose, onPromoted }) {
+  const { notify } = useNotify()
+  const [selectedTitle, setSelectedTitle] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const titleCounts = {}
+  teachers.forEach((t) => {
+    if (t.role === 'admin' && t.title) titleCounts[t.title] = (titleCounts[t.title] || 0) + 1
+  })
+  function isTitleFull(title) {
+    return (titleCounts[title] || 0) >= TITLE_LIMITS[title]
+  }
+
+  async function handleConfirm() {
+    if (!selectedTitle) { setError('Select a title first.'); return }
+    if (isTitleFull(selectedTitle)) { setError(`${selectedTitle} already has the maximum of ${TITLE_LIMITS[selectedTitle]}.`); return }
+    setSaving(true)
+    setError('')
+    const { error: updateError } = await supabase.from('profiles').update({ role: 'admin', title: selectedTitle }).eq('id', teacher.id)
+    if (updateError) { setError(updateError.message); setSaving(false); return }
+    setSaving(false)
+    notify(`${teacher.full_name} promoted to ${selectedTitle}.`)
+    onPromoted()
+    onClose()
+  }
+
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(420px, 94vw)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3>Promote {teacher.full_name}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
+          Choose the administrative title. This grants full admin access — students, marks, reports, approvals.
+        </p>
+        <label style={fieldLabel}>Title
+          <select value={selectedTitle} onChange={(e) => { setSelectedTitle(e.target.value); setError('') }} style={input}>
+            <option value="">Select…</option>
+            {Object.keys(TITLE_LIMITS).map((title) => (
+              <option key={title} value={title} disabled={isTitleFull(title)}>
+                {title}{isTitleFull(title) ? ` (full — ${titleCounts[title] || 0}/${TITLE_LIMITS[title]})` : ` (${titleCounts[title] || 0}/${TITLE_LIMITS[title]})`}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error && <p style={errorText}>{error}</p>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          <button onClick={onClose} style={secondaryBtn}>Cancel</button>
+          <button onClick={handleConfirm} disabled={saving || !selectedTitle} style={btn}>{saving ? 'Promoting...' : 'Promote'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TeachersScreen() {
+  const { notify, confirmAction } = useNotify()
   const [teachers, setTeachers] = useState([])
   const [loading, setLoading] = useState(true)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [promotingTeacher, setPromotingTeacher] = useState(null)
+  const [assigningTeacher, setAssigningTeacher] = useState(null)
 
   useEffect(() => { loadTeachers() }, [])
 
@@ -2825,45 +3250,58 @@ async function loadTeachers() {
 
   async function removeAssignment(assignmentId) {
     await supabase.from('teacher_assignments').delete().eq('id', assignmentId)
-    loadTeachers()
-  }
-
-  async function promoteToAdmin(teacherId, name) {
-    if (!window.confirm(`Promote ${name} to admin? They will get full access to everything — students, marks, reports, approvals.`)) return
-    await supabase.from('profiles').update({ role: 'admin' }).eq('id', teacherId)
+    notify('Assignment removed.')
     loadTeachers()
   }
 
   async function removeTeacher(teacherId, name) {
-    if (!window.confirm(`Remove ${name}'s access? They will no longer be able to log in or enter marks. This can be reversed by re-approving them.`)) return
+    const confirmed = await confirmAction(`Remove ${name}'s access? They will no longer be able to log in or enter marks. This can be reversed by re-approving them.`, { danger: true, confirmLabel: 'Remove' })
+    if (!confirmed) return
     await supabase.from('profiles').update({ status: 'rejected' }).eq('id', teacherId)
+    notify(`${name}'s access removed.`)
     loadTeachers()
   }
 
   async function setClassTeacher(teacherId, cohort) {
     // Clear anyone else currently appointed to this cohort first —
-    // only one class teacher per cohort at a time
+    // only one class teacher per cohort at a time (admins are eligible too)
     if (cohort) {
       await supabase.from('profiles').update({ class_teacher_of: null }).eq('class_teacher_of', cohort)
     }
     await supabase.from('profiles').update({ class_teacher_of: cohort || null }).eq('id', teacherId)
+    notify(cohort ? 'Class Teacher assigned.' : 'Class Teacher unassigned.')
     loadTeachers()
   }
+
+  const filteredTeachers = teachers.filter((t) => {
+    if (!searchQuery.trim()) return true
+    const q = searchQuery.trim().toLowerCase()
+    return t.full_name?.toLowerCase().includes(q) || t.username?.toLowerCase().includes(q)
+  })
 
   return (
     <div style={pageWrap}>
       <h2>Staff</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
-        Every teacher (and any admin who also teaches) self-assigns their subjects/classes. Remove an assignment here if it was set up wrong.
+        Every teacher (and any admin who also teaches) self-assigns their subjects/classes, or an admin can add one for them below. Remove an assignment here if it was set up wrong.
       </p>
 
-      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : teachers.length === 0 ? (
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 320 }}>Search
+        <input
+          placeholder="Search by name or username..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          style={input}
+        />
+      </label>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : filteredTeachers.length === 0 ? (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 24, textAlign: 'center', color: COLORS.muted, fontSize: 13 }}>
-          No approved staff yet.
+          {teachers.length === 0 ? 'No approved staff yet.' : 'No staff match your search.'}
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {teachers.map((t) => (
+          {filteredTeachers.map((t) => (
             <div key={t.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10, flexWrap: 'wrap', gap: 6 }}>
                 <div>
@@ -2886,30 +3324,31 @@ async function loadTeachers() {
                 </div>
                 <div style={{ display: 'flex', gap: 12 }}>
                   {t.role !== 'admin' && (
-                    <button onClick={() => promoteToAdmin(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                    <button onClick={() => setPromotingTeacher(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                       Promote to Admin
                     </button>
                   )}
+                  <button onClick={() => setAssigningTeacher(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                    + Add Subject/Class
+                  </button>
                   <button onClick={() => removeTeacher(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                     Remove
                   </button>
                 </div>
               </div>
-              {t.role !== 'admin' && (
-                <div style={{ marginBottom: 10 }}>
-                  <label style={{ fontSize: 11.5, color: COLORS.muted }}>
-                    Class Teacher of:{' '}
-                    <select
-                      value={t.class_teacher_of || ''}
-                      onChange={(e) => setClassTeacher(t.id, e.target.value)}
-                      style={{ fontSize: 11.5, padding: '3px 6px', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 4 }}
-                    >
-                      <option value="">— None —</option>
-                      {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-                    </select>
-                  </label>
-                </div>
-              )}
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 11.5, color: COLORS.muted }}>
+                  Class Teacher of:{' '}
+                  <select
+                    value={t.class_teacher_of || ''}
+                    onChange={(e) => setClassTeacher(t.id, e.target.value)}
+                    style={{ fontSize: 11.5, padding: '3px 6px', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 4 }}
+                  >
+                    <option value="">— None —</option>
+                    {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </select>
+                </label>
+              </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {t.assignments.length === 0 && (
                   <span style={{ fontSize: 12, color: COLORS.muted, fontStyle: 'italic' }}>No subjects assigned</span>
@@ -2924,6 +3363,22 @@ async function loadTeachers() {
             </div>
           ))}
         </div>
+      )}
+
+      {promotingTeacher && (
+        <PromoteToAdminModal
+          teacher={promotingTeacher}
+          teachers={teachers}
+          onClose={() => setPromotingTeacher(null)}
+          onPromoted={loadTeachers}
+        />
+      )}
+      {assigningTeacher && (
+        <AddAssignmentModal
+          teacherId={assigningTeacher.id}
+          onClose={() => setAssigningTeacher(null)}
+          onAdded={() => { setAssigningTeacher(null); notify('Subject/class added.'); loadTeachers() }}
+        />
       )}
     </div>
   )
@@ -3482,7 +3937,9 @@ function GateScreen({ children }) {
 export default function App() {
   return (
     <GateScreen>
-      <AppContent />
+      <NotificationProvider>
+        <AppContent />
+      </NotificationProvider>
     </GateScreen>
   )
 }

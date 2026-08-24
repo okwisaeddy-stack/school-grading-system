@@ -1,5 +1,100 @@
 import { supabase } from './supabaseClient'
 const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY
+
+// Phrases that show up when the model leaks its own instructions/reasoning
+// instead of answering (common with reasoning models like gpt-oss-20b when
+// `message.content` comes back empty and we'd otherwise fall back to
+// `message.reasoning`, which is the model "thinking out loud" about the
+// prompt rather than the actual remark).
+const LEAK_PATTERNS = [
+  /\binstructions?\b/i,
+  /\bmust be\b/i,
+  /\bmaximum of\b/i,
+  /\bwords? in total\b/i,
+  /\bone sentence\b/i,
+  /\bin order to\b/i,
+  /\bstudent name\s*:/i,
+  /\bcurrent performance\s*:/i,
+  /\bprevious performance\s*:/i,
+  /\bsubjects? and scores?\s*:/i,
+  /\boutput only\b/i,
+  /\braw (remark|sentence|text)\b/i,
+  /\bdo not use\b/i,
+  /\bno quotes?\b/i,
+  /\bno markdown\b/i,
+  /\bneed to generate\b/i,
+  /\blet me\b/i,
+  /\bi need to\b/i,
+  /\bi should\b/i,
+]
+
+function cleanText(raw) {
+  return (raw || '').trim().replace(/^["'`]|["'`]$/g, '').trim()
+}
+
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length
+}
+
+// A remark is treated as "leaked" (the model echoing its own instructions or
+// reasoning instead of answering) if it contains any of the telltale phrases
+// above, or if it's implausibly long for the word limit we asked for.
+function looksLeaked(text, maxWords) {
+  if (!text) return true
+  if (LEAK_PATTERNS.some((re) => re.test(text))) return true
+  if (countWords(text) > maxWords * 3) return true
+  return false
+}
+
+// Calls Groq's chat completions endpoint once and returns the cleaned text,
+// preferring `message.content` and only falling back to `message.reasoning`
+// (gpt-oss-20b sometimes puts the whole answer there) as a last resort.
+async function callGroqOnce(promptText, { temperature, maxTokens }) {
+  const url = 'https://api.groq.com/openai/v1/chat/completions'
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-oss-20b',
+      messages: [{ role: 'user', content: promptText }],
+      temperature,
+      max_tokens: maxTokens,
+    }),
+  })
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}))
+    if (response.status === 429) {
+      throw new Error('Groq rate limit reached. Wait a moment and try again.')
+    }
+    throw new Error(errData.error?.message || `Generation failed with status ${response.status}`)
+  }
+  const result = await response.json()
+  const message = result?.choices?.[0]?.message || {}
+  return cleanText(message.content) || cleanText(message.reasoning)
+}
+
+// Calls Groq and retries (a few times, with a slightly higher temperature
+// each pass to break out of a repeating bad pattern) until we get text that
+// doesn't look like leaked instructions/reasoning, or gives up with a clear
+// error instead of silently returning garbage.
+async function generateValidatedText(promptText, { maxWords, temperature = 0.3, maxTokens = 300, maxAttempts = 3 }) {
+  let lastAttempt = ''
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const text = await callGroqOnce(promptText, {
+      temperature: Math.min(temperature + attempt * 0.15, 0.9),
+      maxTokens,
+    })
+    lastAttempt = text
+    if (text && !looksLeaked(text, maxWords)) {
+      return text
+    }
+  }
+  throw new Error("Couldn't get a clean remark after a few tries — please try again.")
+}
+
 /**
  * Checks if the automated remarks feature is enabled by Admin globally.
  * @returns {Promise<boolean>}
@@ -78,32 +173,7 @@ Instructions:
 4. Do NOT use words or phrases like "AI", "As an AI", "AI analysis", "system", or "computer".
 5. Output ONLY the raw remark text without quotes, headers, or surrounding markdown.
 `
-  const url = 'https://api.groq.com/openai/v1/chat/completions'
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-20b',
-      messages: [{ role: 'user', content: promptText }],
-      temperature: 0.3,
-      max_tokens: 200,
-    }),
-  })
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}))
-    if (response.status === 429) {
-      throw new Error('Groq rate limit reached. Wait a moment and try again.')
-    }
-    throw new Error(errData.error?.message || `Generation failed with status ${response.status}`)
-  }
-  const result = await response.json()
-  const message = result?.choices?.[0]?.message || {}
-  const rawRemark = (message.content?.trim() || message.reasoning?.trim() || '')
-  // Clean quotes or markdown wrappers
-  const cleanRemark = rawRemark.replace(/^["'`]|["'`]$/g, '').trim()
+  const cleanRemark = await generateValidatedText(promptText, { maxWords: 6, temperature: 0.3 })
   // Log generation in audit log
   try {
     const { data: { user } } = await supabase.auth.getUser()
@@ -160,31 +230,7 @@ Instructions:
 3. Do NOT use words or phrases like "AI", "As an AI", "system", or "computer".
 4. Output ONLY the raw sentence, no quotes, headers, or markdown.
 `
-  const url = 'https://api.groq.com/openai/v1/chat/completions'
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-20b',
-      messages: [{ role: 'user', content: promptText }],
-      temperature: 0.4,
-      max_tokens: 200,
-    }),
-  })
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}))
-    if (response.status === 429) {
-      throw new Error('Groq rate limit reached. Wait a moment and try again.')
-    }
-    throw new Error(errData.error?.message || `Generation failed with status ${response.status}`)
-  }
-  const result = await response.json()
-  const message = result?.choices?.[0]?.message || {}
-  const rawRemark = (message.content?.trim() || message.reasoning?.trim() || '')
-  const cleanRemark = rawRemark.replace(/^["'`]|["'`]$/g, '').trim()
+  const cleanRemark = await generateValidatedText(promptText, { maxWords: 15, temperature: 0.4 })
   try {
     const { data: { user } } = await supabase.auth.getUser()
     await supabase.from('remarks_audit_log').insert({
