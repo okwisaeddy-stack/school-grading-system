@@ -347,7 +347,7 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals']
+const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
@@ -1264,8 +1264,17 @@ function StudentsScreen() {
     const confirmed = await confirmAction(`Delete ${name || 'this student'}? This also removes their marks, subjects, and report history. This cannot be undone.`, { danger: true, confirmLabel: 'Delete' })
     if (!confirmed) return
     setDeletingId(id)
-    await supabase.from('students').delete().eq('id', id)
+
+    const { error: marksError } = await supabase.from('marks').delete().eq('student_id', id)
+    if (marksError) { setDeletingId(null); notify(`Couldn't delete: ${marksError.message}`, 'error'); return }
+
+    const { error: subjectsError } = await supabase.from('student_subjects').delete().eq('student_id', id)
+    if (subjectsError) { setDeletingId(null); notify(`Couldn't delete: ${subjectsError.message}`, 'error'); return }
+
+    const { error: studentError } = await supabase.from('students').delete().eq('id', id)
     setDeletingId(null)
+    if (studentError) { notify(`Couldn't delete: ${studentError.message}`, 'error'); return }
+
     notify(`${name || 'Student'} deleted.`)
     loadStudents()
   }
@@ -2406,21 +2415,63 @@ function TeacherHome({ profile, onLogout }) {
 // ============================================================================
 // GRADING LOGIC (mirrors the SQL functions — kept in sync manually)
 // ============================================================================
-function kcseGrade(score) {
-  if (score >= 80) return 'A'
-  if (score >= 75) return 'A-'
-  if (score >= 70) return 'B+'
-  if (score >= 65) return 'B'
-  if (score >= 60) return 'B-'
-  if (score >= 55) return 'C+'
-  if (score >= 50) return 'C'
-  if (score >= 45) return 'C-'
-  if (score >= 40) return 'D+'
-  if (score >= 35) return 'D'
-  if (score >= 30) return 'D-'
-  return 'E'
+// Default KNEC scale — used until/unless an admin saves a custom one in Supabase (grade_scale table)
+const DEFAULT_KNEC_SCALE = [
+  { label: 'A', min_score: 80, points: 12 },
+  { label: 'A-', min_score: 75, points: 11 },
+  { label: 'B+', min_score: 70, points: 10 },
+  { label: 'B', min_score: 65, points: 9 },
+  { label: 'B-', min_score: 60, points: 8 },
+  { label: 'C+', min_score: 55, points: 7 },
+  { label: 'C', min_score: 50, points: 6 },
+  { label: 'C-', min_score: 45, points: 5 },
+  { label: 'D+', min_score: 40, points: 4 },
+  { label: 'D', min_score: 35, points: 3 },
+  { label: 'D-', min_score: 30, points: 2 },
+  { label: 'E', min_score: 0, points: 1 },
+]
+
+const GradeScaleContext = createContext(null)
+
+function useGradeScale() {
+  const ctx = useContext(GradeScaleContext)
+  return ctx || { scale: DEFAULT_KNEC_SCALE, loading: false, reload: () => {} }
 }
-const KCSE_POINTS = { A: 12, 'A-': 11, 'B+': 10, B: 9, 'B-': 8, 'C+': 7, C: 6, 'C-': 5, 'D+': 4, D: 3, 'D-': 2, E: 1 }
+
+function GradeScaleProvider({ children }) {
+  const [scale, setScale] = useState(DEFAULT_KNEC_SCALE)
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('grade_scale').select('*').order('min_score', { ascending: false })
+    if (!error && data && data.length > 0) {
+      setScale(data.map((r) => ({ label: r.label, min_score: r.min_score, points: r.points })))
+    } else {
+      setScale(DEFAULT_KNEC_SCALE)
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  return (
+    <GradeScaleContext.Provider value={{ scale, loading, reload }}>
+      {children}
+    </GradeScaleContext.Provider>
+  )
+}
+
+// scale must be sorted descending by min_score (GradeScaleProvider guarantees this)
+function kcseGrade(score, scale = DEFAULT_KNEC_SCALE) {
+  for (const row of scale) {
+    if (score >= row.min_score) return row.label
+  }
+  return scale[scale.length - 1]?.label ?? 'E'
+}
+function pointsForGrade(label, scale = DEFAULT_KNEC_SCALE) {
+  return scale.find((r) => r.label === label)?.points ?? 0
+}
 
 function cbcLevel(score) {
   if (score >= 90) return 'EE1'
@@ -2435,16 +2486,17 @@ function cbcLevel(score) {
 const CBC_POINTS = { EE1: 8, EE2: 7, ME1: 6, ME2: 5, AE1: 4, AE2: 3, BE1: 2, BE2: 1 }
 
 // Best-7 aggregate for KCSE: compulsory always count, best electives fill the rest
-function computeKcseAggregate(subjectScores) {
+function computeKcseAggregate(subjectScores, scale = DEFAULT_KNEC_SCALE) {
+  const maxPoints = Math.max(...scale.map((r) => r.points))
   const withScores = subjectScores.filter((s) => s.score !== null && s.score !== undefined)
   const compulsory = withScores.filter((s) => s.is_compulsory)
   const electives = withScores
     .filter((s) => !s.is_compulsory)
-    .sort((a, b) => KCSE_POINTS[kcseGrade(b.score)] - KCSE_POINTS[kcseGrade(a.score)])
+    .sort((a, b) => pointsForGrade(kcseGrade(b.score, scale), scale) - pointsForGrade(kcseGrade(a.score, scale), scale))
   const slotsLeft = Math.max(7 - compulsory.length, 0)
   const counted = [...compulsory, ...electives.slice(0, slotsLeft)]
-  const total = counted.reduce((sum, s) => sum + KCSE_POINTS[kcseGrade(s.score)], 0)
-  const maxTotal = counted.length * 12
+  const total = counted.reduce((sum, s) => sum + pointsForGrade(kcseGrade(s.score, scale), scale), 0)
+  const maxTotal = counted.length * maxPoints
   return { total, maxTotal, subjectCount: counted.length }
 }
 
@@ -2740,6 +2792,7 @@ function buildSmsMessage(report) {
 
   function ReportsScreen() {
   const { notify } = useNotify()
+  const { scale: gradeScale } = useGradeScale()
   const [mode, setMode] = useState('single') // single | batch
   const [batchCohortFilter, setBatchCohortFilter] = useState('form_4')
   const [exams, setExams] = useState([])
@@ -2784,14 +2837,14 @@ async function computeReportFor(student, examId, cache = {}) {
         is_compulsory: ss.is_compulsory,
         score: now ? now.score : null,
         prevScore: prev ? prev.score : null,
-        grade: now ? (isCbc ? cbcLevel(now.score) : kcseGrade(now.score)) : null,
-        prevGrade: prev ? (isCbc ? cbcLevel(prev.score) : kcseGrade(prev.score)) : null,
+        grade: now ? (isCbc ? cbcLevel(now.score) : kcseGrade(now.score, gradeScale)) : null,
+        prevGrade: prev ? (isCbc ? cbcLevel(prev.score) : kcseGrade(prev.score, gradeScale)) : null,
         remark: now ? now.remark : null,
       }
     })
     const aggregate = isCbc
       ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })))
-      : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })))
+      : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })), gradeScale)
     // Cache cohort rankings per exam so a batch run doesn't refetch the
     // same cohort-wide ranking data for every single student.
     const rankKey = `${student.cohort}:${examId}`
@@ -2807,7 +2860,7 @@ async function computeReportFor(student, examId, cache = {}) {
     if (prevExam) {
       prevAggregate = isCbc
         ? computeCbcTotal(subjectRows.map((r) => ({ score: r.prevScore })))
-        : computeKcseAggregate(subjectRows.map((r) => ({ score: r.prevScore, is_compulsory: r.is_compulsory })))
+        : computeKcseAggregate(subjectRows.map((r) => ({ score: r.prevScore, is_compulsory: r.is_compulsory })), gradeScale)
       const prevRankKey = `${student.cohort}:${prevExam.id}`
       if (!cache[prevRankKey]) {
         const { data } = await supabase.rpc('compute_cohort_rankings', { p_cohort: student.cohort, p_exam_id: prevExam.id })
@@ -3255,10 +3308,16 @@ async function loadTeachers() {
   }
 
   async function removeTeacher(teacherId, name) {
-    const confirmed = await confirmAction(`Remove ${name}'s access? They will no longer be able to log in or enter marks. This can be reversed by re-approving them.`, { danger: true, confirmLabel: 'Remove' })
+    const confirmed = await confirmAction(`Permanently delete ${name}? This removes their account and assignments. This cannot be undone.`, { danger: true, confirmLabel: 'Delete' })
     if (!confirmed) return
-    await supabase.from('profiles').update({ status: 'rejected' }).eq('id', teacherId)
-    notify(`${name}'s access removed.`)
+
+    const { error: assignError } = await supabase.from('teacher_assignments').delete().eq('teacher_id', teacherId)
+    if (assignError) { notify(`Couldn't delete: ${assignError.message}`, 'error'); return }
+
+    const { error: profileError } = await supabase.from('profiles').delete().eq('id', teacherId)
+    if (profileError) { notify(`Couldn't delete: ${profileError.message}`, 'error'); return }
+
+    notify(`${name} deleted.`)
     loadTeachers()
   }
 
@@ -3934,11 +3993,118 @@ function GateScreen({ children }) {
   return children
 }
 
+function SettingsScreen() {
+  const { notify, confirmAction } = useNotify()
+  const { scale, loading, reload } = useGradeScale()
+  const [rows, setRows] = useState([])
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => { setRows(scale.map((r) => ({ ...r }))) }, [scale])
+
+  function updateRow(idx, field, value) {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)))
+  }
+
+  function addRow() {
+    setRows((prev) => [...prev, { label: '', min_score: 0, points: 0 }])
+  }
+
+  function removeRow(idx) {
+    setRows((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  async function handleSave() {
+    const cleaned = rows
+      .map((r) => ({ label: r.label.trim(), min_score: Number(r.min_score), points: Number(r.points) }))
+      .filter((r) => r.label)
+    if (cleaned.length === 0) {
+      notify('Add at least one grade before saving.', 'error')
+      return
+    }
+    const confirmed = await confirmAction('Save this grading scale? It will immediately change how grades, points, and rankings are calculated across the app.', { confirmLabel: 'Save' })
+    if (!confirmed) return
+    setSaving(true)
+    const { error: deleteError } = await supabase.from('grade_scale').delete().gte('min_score', -1)
+    if (deleteError) { setSaving(false); notify(`Couldn't save: ${deleteError.message}`, 'error'); return }
+    const { error: insertError } = await supabase.from('grade_scale').insert(cleaned)
+    setSaving(false)
+    if (insertError) { notify(`Couldn't save: ${insertError.message}`, 'error'); return }
+    notify('Grading scale updated.')
+    reload()
+  }
+
+  async function handleResetToKnec() {
+    const confirmed = await confirmAction('Reset to the standard KNEC grading scale? Any custom scale you saved will be replaced.', { danger: true, confirmLabel: 'Reset' })
+    if (!confirmed) return
+    setSaving(true)
+    const { error: deleteError } = await supabase.from('grade_scale').delete().gte('min_score', -1)
+    setSaving(false)
+    if (deleteError) { notify(`Couldn't reset: ${deleteError.message}`, 'error'); return }
+    notify('Reset to KNEC grading scale.')
+    reload()
+  }
+
+  if (loading) return <div style={pageWrap}><p>Loading...</p></div>
+
+  return (
+    <div style={pageWrap}>
+      <h2 style={{ marginBottom: 4 }}>Settings</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
+        Customize the grading scale used for Form 1–4 letter grades and points (KCSE-style subjects). This does not affect the CBC (Grade 10) level scale.
+      </p>
+
+      <div style={sectionLabel}>Grading scale</div>
+      <div style={{ border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'hidden', marginBottom: 14 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Grade</th>
+              <th style={th}>Min score</th>
+              <th style={th}>Points</th>
+              <th style={th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, idx) => (
+              <tr key={idx} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                <td style={td}>
+                  <input value={r.label} onChange={(e) => updateRow(idx, 'label', e.target.value)} style={{ ...input, marginBottom: 0, width: 70 }} placeholder="e.g. A" />
+                </td>
+                <td style={td}>
+                  <input type="number" value={r.min_score} onChange={(e) => updateRow(idx, 'min_score', e.target.value)} style={{ ...input, marginBottom: 0, width: 90 }} />
+                </td>
+                <td style={td}>
+                  <input type="number" value={r.points} onChange={(e) => updateRow(idx, 'points', e.target.value)} style={{ ...input, marginBottom: 0, width: 90 }} />
+                </td>
+                <td style={td}>
+                  <button onClick={() => removeRow(idx)} style={{ background: 'none', border: 'none', color: COLORS.warn, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 }}>Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <button onClick={addRow} style={secondaryBtn}>+ Add grade</button>
+        <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save scale'}</button>
+        <button onClick={handleResetToKnec} disabled={saving} style={secondaryBtn}>Reset to KNEC default</button>
+      </div>
+
+      <p style={{ color: COLORS.muted, fontSize: 12, marginTop: 16 }}>
+        A student's grade is the highest row whose minimum score they meet or beat, so keep minimum scores in descending order from top to bottom.
+      </p>
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <GateScreen>
       <NotificationProvider>
-        <AppContent />
+        <GradeScaleProvider>
+          <AppContent />
+        </GradeScaleProvider>
       </NotificationProvider>
     </GateScreen>
   )
@@ -3997,6 +4163,7 @@ function AppContent() {
           {tab === 'Teachers' && <TeachersScreen />}
           {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
           {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
+          {tab === 'Settings' && <SettingsScreen />}
         </div>
       )
     }
