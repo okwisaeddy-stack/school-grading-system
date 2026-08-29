@@ -1,3 +1,5 @@
+// src/theme.js
+
 export const COLORS = {
   paper: '#F7F5EF',
   card: '#FFFFFF',

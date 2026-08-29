@@ -11,6 +11,14 @@ import {
   setAutomatedRemarksEnabled,
   getAutomatedRemarksCount,
 } from './lib/gemini'
+import {
+  COLORS, wrap, card, input, btn, secondaryBtn, errorText, link, pageWrap,
+  th, td, modalOverlay, modalCard, fieldLabel, sectionLabel, pillStatic, pillBtn,
+} from './theme'
+import {
+  DEFAULT_KNEC_SCALE, kcseGrade, pointsForGrade, cbcLevel, CBC_POINTS,
+  computeKcseAggregate, computeCbcTotal,
+} from './utils/grading'
 
 // ============================================================================
 // Helpers
@@ -30,32 +38,8 @@ function isExcludedTogether(selected, candidate) {
 }
 
 // ============================================================================
-// Styles
+// Styles — extracted to src/theme/index.js (imported above)
 // ============================================================================
-const COLORS = {
-  paper: '#F7F5EF', card: '#FFFFFF', ink: '#1E2A24', band: '#2C3E37',
-  bandText: '#F4F1E8', rule: '#C9C2AE', ruleLight: '#E4DFD1',
-  accent: '#9C6B2E', accentSoft: '#E9DDC6', good: '#3E6B4F', goodSoft: '#E4EEE7',
-  warn: '#B0442E', warnSoft: '#F6E4DF', muted: '#6B6558',
-}
-const wrap = { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'sans-serif', background: COLORS.paper }
-const card = { width: 340, padding: 28, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 10, background: COLORS.card }
-const input = { width: '100%', padding: 10, marginBottom: 10, border: '1px solid #ccc', borderRadius: 6, boxSizing: 'border-box' }
-const btn = { padding: '10px 18px', background: COLORS.band, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }
-const secondaryBtn = { padding: '8px 16px', background: COLORS.card, color: COLORS.ink, border: `1px solid ${COLORS.rule}`, borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-const errorText = { color: COLORS.warn, fontSize: 12 }
-const link = { color: COLORS.accent, cursor: 'pointer' }
-const pageWrap = { maxWidth: 980, margin: '0 auto', padding: 'clamp(14px, 4vw, 28px) clamp(12px, 4vw, 20px)', fontFamily: 'sans-serif' }
-const th = { textAlign: 'left', padding: '10px 14px', fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase', color: COLORS.muted, background: COLORS.paper }
-const td = { padding: '10px 14px', fontSize: 13 }
-const modalOverlay = { position: 'fixed', inset: 0, background: 'rgba(30,42,36,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 50 }
-const modalCard = { background: '#fff', borderRadius: 10, padding: 'clamp(14px, 4vw, 24px)', width: '100%', maxWidth: 'min(560px, 94vw)', maxHeight: '90vh', overflowY: 'auto', fontFamily: 'sans-serif', boxSizing: 'border-box' }
-const fieldLabel = { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: COLORS.muted, fontWeight: 600 }
-const sectionLabel = { fontSize: 12, color: COLORS.muted, fontWeight: 700, textTransform: 'uppercase', marginBottom: 6 }
-const pillStatic = { padding: '5px 12px', borderRadius: 14, fontSize: 12, fontWeight: 600, background: COLORS.accentSoft, color: COLORS.accent, border: `1px solid ${COLORS.accent}` }
-function pillBtn(active) {
-  return { padding: '5px 12px', borderRadius: 14, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: active ? COLORS.band : COLORS.paper, color: active ? '#fff' : COLORS.ink, border: `1px solid ${active ? COLORS.band : COLORS.ruleLight}` }
-}
 
 // ============================================================================
 // NOTIFICATIONS — app-themed toasts & confirm modal, replacing window.alert/confirm
@@ -179,13 +163,16 @@ function Login({ onSwitchToSignup }) {
   )
 }
 
-const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies': 1 }
+const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies': 1, 'School Manager': 1, 'Director': 1 }
+// Titles that count as "Leadership" — these admins can enter/edit marks for
+// any subject and class directly, without self-assigning a teacher row first.
+const LEADERSHIP_TITLES = Object.keys(TITLE_LIMITS)
 
 function Signup({ onSwitchToLogin, onSignedUp }) {
   const [fullName, setFullName] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [roleChoice, setRoleChoice] = useState('teacher') // 'teacher' | 'Principal' | 'Deputy Principal' | 'Dean of Studies'
+  const [roleChoice, setRoleChoice] = useState('teacher') // 'teacher' | one of Object.keys(TITLE_LIMITS)
   const [titleCounts, setTitleCounts] = useState({})
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -244,9 +231,11 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
         <label style={fieldLabel}>Your role
           <select value={roleChoice} onChange={(e) => setRoleChoice(e.target.value)} style={input}>
             <option value="teacher">Subject Teacher</option>
-            <option value="Principal" disabled={isTitleFull('Principal')}>Principal{isTitleFull('Principal') ? ' (taken)' : ''}</option>
-            <option value="Deputy Principal" disabled={isTitleFull('Deputy Principal')}>Deputy Principal{isTitleFull('Deputy Principal') ? ' (full)' : ''}</option>
-            <option value="Dean of Studies" disabled={isTitleFull('Dean of Studies')}>Dean of Studies{isTitleFull('Dean of Studies') ? ' (taken)' : ''}</option>
+            {Object.keys(TITLE_LIMITS).map((title) => (
+              <option key={title} value={title} disabled={isTitleFull(title)}>
+                {title}{isTitleFull(title) ? ' (taken)' : ''}
+              </option>
+            ))}
           </select>
         </label>
         {roleChoice !== 'teacher' && !isTitleFull(roleChoice) && (
@@ -347,7 +336,12 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
+  const isLeadership = LEADERSHIP_TITLES.includes(title)
+  const tabs = [
+    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers',
+    ...(isLeadership ? ['Enter Marks'] : []),
+    'My Teaching', 'Approvals', 'Settings',
+  ]
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
@@ -520,7 +514,7 @@ function ApprovalsScreen({ currentUserId }) {
   async function approve(id) {
     const person = pending.find((p) => p.id === id)
     if (person?.role === 'admin' && person.title) {
-      const limit = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies': 1 }[person.title]
+      const limit = TITLE_LIMITS[person.title]
       const { count } = await supabase
         .from('profiles').select('*', { count: 'exact', head: true })
         .eq('role', 'admin').eq('title', person.title).eq('status', 'approved')
@@ -1610,6 +1604,7 @@ function ExamMarksOverview({ exam, onBack }) {
 }
 
 function ExamsScreen() {
+  const { notify, confirmAction } = useNotify()
   const [exams, setExams] = useState([])
   const [loading, setLoading] = useState(true)
   const [name, setName] = useState('')
@@ -1617,6 +1612,7 @@ function ExamsScreen() {
   const [year, setYear] = useState(2026)
   const [resumeDate, setResumeDate] = useState('')
   const [saving, setSaving] = useState(false)
+  const [deletingId, setDeletingId] = useState(null)
   const [editingResumeId, setEditingResumeId] = useState(null)
   const [editingResumeValue, setEditingResumeValue] = useState('')
 
@@ -1707,6 +1703,29 @@ function ExamsScreen() {
     setEditingOfficialsId(null)
     loadExams()
   }
+
+  async function handleDeleteExam(examId, examName) {
+    const confirmed = await confirmAction(
+      `Permanently delete "${examName}"? This also removes every mark and report card recorded for this exam. This cannot be undone.`,
+      { danger: true, confirmLabel: 'Delete Exam' }
+    )
+    if (!confirmed) return
+    setDeletingId(examId)
+
+    const { error: reportCardsError } = await supabase.from('report_cards').delete().eq('exam_id', examId)
+    if (reportCardsError) { setDeletingId(null); notify(`Couldn't delete: ${reportCardsError.message}`, 'error'); return }
+
+    const { error: marksError } = await supabase.from('marks').delete().eq('exam_id', examId)
+    if (marksError) { setDeletingId(null); notify(`Couldn't delete: ${marksError.message}`, 'error'); return }
+
+    const { error: examError } = await supabase.from('exams').delete().eq('id', examId)
+    setDeletingId(null)
+    if (examError) { notify(`Couldn't delete: ${examError.message}`, 'error'); return }
+
+    notify(`${examName} deleted.`)
+    loadExams()
+  }
+
 
   const isNarrow = useIsNarrow()
   const [viewingExam, setViewingExam] = useState(null)
@@ -1808,6 +1827,13 @@ function ExamsScreen() {
               <button onClick={() => setViewingExam(e)} style={{ ...secondaryBtn, marginTop: 10, width: '100%', fontSize: 12 }}>
                 📊 View Marks
               </button>
+              <button
+                onClick={() => handleDeleteExam(e.id, e.name)}
+                disabled={deletingId === e.id}
+                style={{ ...secondaryBtn, marginTop: 6, width: '100%', fontSize: 12, color: COLORS.warn, borderColor: COLORS.warn }}
+              >
+                {deletingId === e.id ? 'Deleting...' : '🗑 Delete Exam'}
+              </button>
             </div>
           ))}
           {exams.length === 0 && (
@@ -1844,8 +1870,15 @@ function ExamsScreen() {
                     )}
                   </td>
                   <td style={{ ...td, textAlign: 'right' }}>
-                    <button onClick={() => setViewingExam(e)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                    <button onClick={() => setViewingExam(e)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginRight: 14 }}>
                       📊 View Marks
+                    </button>
+                    <button
+                      onClick={() => handleDeleteExam(e.id, e.name)}
+                      disabled={deletingId === e.id}
+                      style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                    >
+                      {deletingId === e.id ? 'Deleting...' : '🗑 Delete'}
                     </button>
                   </td>
                 </tr>
@@ -1947,11 +1980,14 @@ function TeacherOnboarding({ teacherId, onDone }) {
 // ============================================================================
 // TEACHER: Marks Entry
 // ============================================================================
-function MarksEntryContent({ teacherId }) {
+function MarksEntryContent({ teacherId, adminMode = false }) {
   const { notify } = useNotify()
   const [showManage, setShowManage] = useState(false)
   const [myAssignments, setMyAssignments] = useState([])
   const [selectedAssignment, setSelectedAssignment] = useState('')
+  const [allSubjects, setAllSubjects] = useState([])
+  const [manualSubjectId, setManualSubjectId] = useState('')
+  const [manualClassLabel, setManualClassLabel] = useState('')
   const [exams, setExams] = useState([])
   const [selectedExamId, setSelectedExamId] = useState('')
   const [students, setStudents] = useState([])
@@ -1966,10 +2002,38 @@ function MarksEntryContent({ teacherId }) {
   const [bulkGenerating, setBulkGenerating] = useState(false)
   const [remarkBulkMsg, setRemarkBulkMsg] = useState('')
   const isNarrow = useIsNarrow()
-  useEffect(() => { loadAssignmentsAndExams() }, [teacherId])
-  useEffect(() => { if (selectedAssignment && selectedExamId) loadStudentsAndMarks() }, [selectedAssignment, selectedExamId])
+  // In admin mode (Leadership titles), a "virtual" assignment is built from
+  // the manually picked subject + class instead of a teacher_assignments row,
+  // so these admins can mark any subject/class without self-assigning first.
+  function currentAssignment() {
+    if (adminMode) {
+      if (!manualSubjectId || !manualClassLabel) return null
+      return {
+        subject_id: manualSubjectId,
+        class_label: manualClassLabel,
+        subjects: { name: allSubjects.find((s) => s.id === manualSubjectId)?.name },
+      }
+    }
+    return myAssignments.find((a) => a.id === selectedAssignment) || null
+  }
+  useEffect(() => { loadAssignmentsAndExams() }, [teacherId, adminMode])
+  useEffect(() => {
+    const ready = adminMode ? (manualSubjectId && manualClassLabel) : selectedAssignment
+    if (ready && selectedExamId) loadStudentsAndMarks()
+  }, [selectedAssignment, manualSubjectId, manualClassLabel, selectedExamId])
   async function loadAssignmentsAndExams() {
     setLoading(true)
+    if (adminMode) {
+      const [{ data: subjectData }, { data: examData }] = await Promise.all([
+        supabase.from('subjects').select('*').order('name'),
+        supabase.from('exams').select('*').order('order_index', { ascending: false }),
+      ])
+      setAllSubjects(subjectData || [])
+      setExams(examData || [])
+      if (examData && examData.length > 0) setSelectedExamId(examData[0].id)
+      setLoading(false)
+      return
+    }
     const [{ data: assignData }, { data: examData }] = await Promise.all([
       supabase.from('teacher_assignments').select('*, subjects(name)').eq('teacher_id', teacherId),
       supabase.from('exams').select('*').order('order_index', { ascending: false }),
@@ -1982,7 +2046,7 @@ function MarksEntryContent({ teacherId }) {
   }
   async function loadStudentsAndMarks() {
     setLoading(true)
-    const assignment = myAssignments.find((a) => a.id === selectedAssignment)
+    const assignment = currentAssignment()
     if (!assignment) { setLoading(false); return }
     const { data: classStudents } = await supabase
       .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
@@ -2046,7 +2110,7 @@ function MarksEntryContent({ teacherId }) {
   // so bulk can collect failures instead of popping N alerts.
   async function runGenerate(studentId) {
     const student = students.find((s) => s.id === studentId)
-    const assignment = myAssignments.find((a) => a.id === selectedAssignment)
+    const assignment = currentAssignment()
     const subjectName = assignment?.subjects?.name || 'Subject'
     const score = currentScoreFor(studentId)
     const prevScore = prevMarksByStudent[studentId]?.score
@@ -2112,7 +2176,7 @@ function MarksEntryContent({ teacherId }) {
   async function saveAll() {
     setSaving(true)
     setSavedMsg('')
-    const assignment = myAssignments.find((a) => a.id === selectedAssignment)
+    const assignment = currentAssignment()
     const rows = Object.entries(drafts)
       .filter(([, v]) => v !== '' && v !== undefined)
       .map(([studentId, value]) => ({
@@ -2131,26 +2195,50 @@ function MarksEntryContent({ teacherId }) {
     }
     setSaving(false)
   }
-  const assignment = myAssignments.find((a) => a.id === selectedAssignment)
+  const assignment = currentAssignment()
   const enteredCount = students.filter((s) => marksByStudent[s.id] || drafts[s.id] !== undefined).length
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-        <h2>Marks Entry</h2>
-        <button onClick={() => setShowManage(true)} style={secondaryBtn}>+ Add another subject/class</button>
+        <h2>Marks Entry{adminMode ? ' — Any Class' : ''}</h2>
+        {!adminMode && (
+          <button onClick={() => setShowManage(true)} style={secondaryBtn}>+ Add another subject/class</button>
+        )}
       </div>
-      {myAssignments.length === 0 ? (
+      {adminMode && (
+        <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 4 }}>
+          As a Leadership admin you can enter or correct marks for any subject and class directly — no need to self-assign first.
+        </p>
+      )}
+      {!adminMode && myAssignments.length === 0 ? (
         <p style={{ color: COLORS.muted }}>No subjects assigned yet.</p>
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
-            <label style={fieldLabel}>Subject / Class
-              <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={{ ...input, minWidth: 220 }}>
-                {myAssignments.map((a) => (
-                  <option key={a.id} value={a.id}>{a.subjects?.name} — {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label}</option>
-                ))}
-              </select>
-            </label>
+            {adminMode ? (
+              <>
+                <label style={fieldLabel}>Subject
+                  <select value={manualSubjectId} onChange={(e) => setManualSubjectId(e.target.value)} style={{ ...input, minWidth: 180 }}>
+                    <option value="">Choose subject…</option>
+                    {allSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </label>
+                <label style={fieldLabel}>Class
+                  <select value={manualClassLabel} onChange={(e) => setManualClassLabel(e.target.value)} style={{ ...input, minWidth: 160 }}>
+                    <option value="">Choose class…</option>
+                    {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </select>
+                </label>
+              </>
+            ) : (
+              <label style={fieldLabel}>Subject / Class
+                <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={{ ...input, minWidth: 220 }}>
+                  {myAssignments.map((a) => (
+                    <option key={a.id} value={a.id}>{a.subjects?.name} — {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label style={fieldLabel}>Exam
               <select value={selectedExamId} onChange={(e) => setSelectedExamId(e.target.value)} style={{ ...input, minWidth: 220 }}>
                 {exams.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.term} {e.year}</option>)}
@@ -2343,6 +2431,19 @@ function AdminTeachingScreen({ profile }) {
 }
 
 // ============================================================================
+// ADMIN (Leadership only): "Enter Marks" — Principal / Deputy Principal /
+// Dean of Studies / School Manager / Director can enter or correct marks for
+// ANY subject and class directly, without needing a teacher_assignments row
+// ============================================================================
+function AdminMarksEntryScreen({ profile }) {
+  return (
+    <div style={pageWrap}>
+      <MarksEntryContent teacherId={profile.id} adminMode />
+    </div>
+  )
+}
+
+// ============================================================================
 // TEACHER: Add another subject/class assignment (post-onboarding)
 // ============================================================================
 function AddAssignmentModal({ teacherId, onClose, onAdded }) {
@@ -2421,24 +2522,9 @@ function TeacherHome({ profile, onLogout }) {
 }
 
 // ============================================================================
-// GRADING LOGIC (mirrors the SQL functions — kept in sync manually)
+// GRADING LOGIC — pure calculation utilities extracted to src/utils/grading.js
+// (GradeScaleContext/Provider stay here since they're React state, not calc logic)
 // ============================================================================
-// Default KNEC scale — used until/unless an admin saves a custom one in Supabase (grade_scale table)
-const DEFAULT_KNEC_SCALE = [
-  { label: 'A', min_score: 80, points: 12 },
-  { label: 'A-', min_score: 75, points: 11 },
-  { label: 'B+', min_score: 70, points: 10 },
-  { label: 'B', min_score: 65, points: 9 },
-  { label: 'B-', min_score: 60, points: 8 },
-  { label: 'C+', min_score: 55, points: 7 },
-  { label: 'C', min_score: 50, points: 6 },
-  { label: 'C-', min_score: 45, points: 5 },
-  { label: 'D+', min_score: 40, points: 4 },
-  { label: 'D', min_score: 35, points: 3 },
-  { label: 'D-', min_score: 30, points: 2 },
-  { label: 'E', min_score: 0, points: 1 },
-]
-
 const GradeScaleContext = createContext(null)
 
 function useGradeScale() {
@@ -2468,51 +2554,6 @@ function GradeScaleProvider({ children }) {
       {children}
     </GradeScaleContext.Provider>
   )
-}
-
-// scale must be sorted descending by min_score (GradeScaleProvider guarantees this)
-function kcseGrade(score, scale = DEFAULT_KNEC_SCALE) {
-  for (const row of scale) {
-    if (score >= row.min_score) return row.label
-  }
-  return scale[scale.length - 1]?.label ?? 'E'
-}
-function pointsForGrade(label, scale = DEFAULT_KNEC_SCALE) {
-  return scale.find((r) => r.label === label)?.points ?? 0
-}
-
-function cbcLevel(score) {
-  if (score >= 90) return 'EE1'
-  if (score >= 75) return 'EE2'
-  if (score >= 58) return 'ME1'
-  if (score >= 41) return 'ME2'
-  if (score >= 31) return 'AE1'
-  if (score >= 21) return 'AE2'
-  if (score >= 11) return 'BE1'
-  return 'BE2'
-}
-const CBC_POINTS = { EE1: 8, EE2: 7, ME1: 6, ME2: 5, AE1: 4, AE2: 3, BE1: 2, BE2: 1 }
-
-// Best-7 aggregate for KCSE: compulsory always count, best electives fill the rest
-function computeKcseAggregate(subjectScores, scale = DEFAULT_KNEC_SCALE) {
-  const maxPoints = Math.max(...scale.map((r) => r.points))
-  const withScores = subjectScores.filter((s) => s.score !== null && s.score !== undefined)
-  const compulsory = withScores.filter((s) => s.is_compulsory)
-  const electives = withScores
-    .filter((s) => !s.is_compulsory)
-    .sort((a, b) => pointsForGrade(kcseGrade(b.score, scale), scale) - pointsForGrade(kcseGrade(a.score, scale), scale))
-  const slotsLeft = Math.max(7 - compulsory.length, 0)
-  const counted = [...compulsory, ...electives.slice(0, slotsLeft)]
-  const total = counted.reduce((sum, s) => sum + pointsForGrade(kcseGrade(s.score, scale), scale), 0)
-  const maxTotal = counted.length * maxPoints
-  return { total, maxTotal, subjectCount: counted.length }
-}
-
-function computeCbcTotal(subjectScores) {
-  const withScores = subjectScores.filter((s) => s.score !== null && s.score !== undefined)
-  const total = withScores.reduce((sum, s) => sum + CBC_POINTS[cbcLevel(s.score)], 0)
-  const maxTotal = withScores.length * 8
-  return { total, maxTotal, subjectCount: withScores.length }
 }
 
 
@@ -4170,6 +4211,7 @@ function AppContent() {
             {tab === 'Performance Track' && <PerformanceTrackScreen />}
             {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
             {tab === 'Teachers' && <TeachersScreen />}
+            {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
             {tab === 'Settings' && <SettingsScreen />}
