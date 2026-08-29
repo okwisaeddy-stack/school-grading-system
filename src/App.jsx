@@ -347,16 +347,17 @@ function useIsNarrow() {
 }
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
-const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
+  const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers', 'My Teaching', 'Approvals', 'Settings']
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
 
-  return (
-    <div style={{ background: COLORS.band, color: COLORS.bandText, fontFamily: 'sans-serif' }}>
-      <div style={{ maxWidth: 980, margin: '0 auto', padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {isNarrow && (
+  if (isNarrow) {
+    // ---- Mobile: unchanged top bar + hamburger drawer ----
+    return (
+      <div style={{ background: COLORS.band, color: COLORS.bandText, fontFamily: 'sans-serif' }}>
+        <div style={{ padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button
               onClick={() => setMenuOpen(true)}
               aria-label="Open menu"
@@ -364,73 +365,80 @@ const tabs = ['Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 
             >
               ☰
             </button>
-          )}
-          <img src="/crest.png" alt="Crest" style={{ width: isNarrow ? 26 : 32, height: isNarrow ? 26 : 32, borderRadius: '50%', flexShrink: 0 }} />
-          <div style={{ fontWeight: 700, fontSize: isNarrow ? 14 : 16 }}>
-            {isNarrow ? 'PWA Records' : 'Paul Wanjigi Alpine — Records'}
+            <img src="/crest.png" alt="Crest" style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0 }} />
+            <div style={{ fontWeight: 700, fontSize: 14 }}>PWA Records</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: '6px 10px', fontSize: 12 }}>🔑</button>
+            <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: '6px 10px', fontSize: 12 }}>Log out</button>
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: isNarrow ? 8 : 14 }}>
-          {!isNarrow && <span style={{ fontSize: 12 }}>{fullName}{title ? ` · ${title}` : ''}</span>}
-          <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
-            {isNarrow ? '🔑' : 'Change Password'}
+        {menuOpen && (
+          <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '72vw', maxWidth: 280, background: COLORS.paper, boxShadow: '2px 0 12px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column', padding: '18px 0' }}>
+              <div style={{ padding: '0 20px 14px', borderBottom: `1px solid ${COLORS.ruleLight}`, marginBottom: 8 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: COLORS.ink }}>{fullName}</div>
+                <div style={{ fontSize: 11, color: COLORS.muted }}>{title || 'Paul Wanjigi Alpine — Records'}</div>
+              </div>
+              {tabs.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => { setTab(t); setMenuOpen(false) }}
+                  style={{ textAlign: 'left', padding: '14px 20px', background: tab === t ? COLORS.accentSoft : 'transparent', color: COLORS.ink, border: 'none', fontSize: 14, fontWeight: tab === t ? 700 : 500, cursor: 'pointer' }}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
+      </div>
+    )
+  }
+
+  // ---- Desktop: fixed left sidebar, Instagram-style ----
+  return (
+    <div style={{
+      width: 240, flexShrink: 0, background: COLORS.band, color: COLORS.bandText,
+      fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column',
+      height: '100vh', position: 'sticky', top: 0,
+    }}>
+      <div style={{ padding: '22px 20px 18px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid rgba(255,255,255,0.12)` }}>
+        <img src="/crest.png" alt="Crest" style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0 }} />
+        <div style={{ fontWeight: 700, fontSize: 15, lineHeight: 1.25 }}>Paul Wanjigi Alpine<br/>Records</div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 10px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {tabs.map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              textAlign: 'left', padding: '10px 14px', borderRadius: 8, border: 'none',
+              background: tab === t ? COLORS.paper : 'transparent',
+              color: tab === t ? COLORS.ink : COLORS.bandText,
+              fontSize: 13.5, fontWeight: tab === t ? 700 : 500, cursor: 'pointer',
+            }}
+          >
+            {t}
           </button>
-          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', padding: isNarrow ? '6px 10px' : '8px 16px', fontSize: 12 }}>
+        ))}
+      </div>
+
+      <div style={{ padding: '14px 16px', borderTop: `1px solid rgba(255,255,255,0.12)` }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 2 }}>{fullName}</div>
+        {title && <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 10 }}>{title}</div>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', fontSize: 12, width: '100%' }}>
+            Change Password
+          </button>
+          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', fontSize: 12, width: '100%' }}>
             Log out
           </button>
         </div>
       </div>
 
-      {!isNarrow && (
-        <div style={{ maxWidth: 980, margin: '0 auto', padding: '0 12px', display: 'flex', gap: 4, overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-          {tabs.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              style={{
-                padding: '10px 16px', background: tab === t ? COLORS.paper : 'transparent',
-                color: tab === t ? COLORS.ink : COLORS.bandText, border: 'none',
-                borderTopLeftRadius: 6, borderTopRightRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {isNarrow && menuOpen && (
-        <div
-          onClick={() => setMenuOpen(false)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 60 }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              position: 'absolute', top: 0, left: 0, bottom: 0, width: '72vw', maxWidth: 280,
-              background: COLORS.paper, boxShadow: '2px 0 12px rgba(0,0,0,0.2)',
-              display: 'flex', flexDirection: 'column', padding: '18px 0',
-            }}
-          >
-            <div style={{ padding: '0 20px 14px', borderBottom: `1px solid ${COLORS.ruleLight}`, marginBottom: 8 }}>
-              <div style={{ fontWeight: 700, fontSize: 15, color: COLORS.ink }}>{fullName}</div>
-              <div style={{ fontSize: 11, color: COLORS.muted }}>{title || 'Paul Wanjigi Alpine — Records'}</div>
-            </div>
-            {tabs.map((t) => (
-              <button
-                key={t}
-                onClick={() => { setTab(t); setMenuOpen(false) }}
-                style={{
-                  textAlign: 'left', padding: '14px 20px', background: tab === t ? COLORS.accentSoft : 'transparent',
-                  color: COLORS.ink, border: 'none', fontSize: 14, fontWeight: tab === t ? 700 : 500, cursor: 'pointer',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
       {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
   )
@@ -4152,18 +4160,20 @@ function AppContent() {
     }
     if (profile.role === 'admin') {
       return (
-        <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
+        <div style={{ background: COLORS.paper, minHeight: '100vh', display: 'flex' }}>
           <TopBar tab={tab} setTab={setTab} onLogout={handleLogout} fullName={profile.full_name} title={profile.title} />
-          {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
-          {tab === 'Students' && <StudentsScreen />}
-          {tab === 'Exams' && <ExamsScreen />}
-          {tab === 'Reports' && <ReportsScreen />}
-          {tab === 'Performance Track' && <PerformanceTrackScreen />}
-          {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
-          {tab === 'Teachers' && <TeachersScreen />}
-          {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
-          {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
-          {tab === 'Settings' && <SettingsScreen />}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
+            {tab === 'Students' && <StudentsScreen />}
+            {tab === 'Exams' && <ExamsScreen />}
+            {tab === 'Reports' && <ReportsScreen />}
+            {tab === 'Performance Track' && <PerformanceTrackScreen />}
+            {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
+            {tab === 'Teachers' && <TeachersScreen />}
+            {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
+            {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
+            {tab === 'Settings' && <SettingsScreen />}
+          </div>
         </div>
       )
     }
