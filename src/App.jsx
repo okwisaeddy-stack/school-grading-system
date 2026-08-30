@@ -4441,6 +4441,27 @@ function TimetableScreen() {
     loadAll()
   }
 
+  async function handleDeleteTimetable() {
+    if (filteredSlots.length === 0) { notify('Nothing to delete for the current filters.', 'error'); return }
+    const scopeLabel = classFilter !== 'all' && teacherFilter !== 'all'
+      ? `${CLASS_OPTIONS.find((c) => c.value === classFilter)?.label} entries for ${teachers.find((t) => t.id === teacherFilter)?.full_name}`
+      : classFilter !== 'all'
+        ? `the entire ${CLASS_OPTIONS.find((c) => c.value === classFilter)?.label} timetable`
+        : teacherFilter !== 'all'
+          ? `${teachers.find((t) => t.id === teacherFilter)?.full_name}'s entire timetable`
+          : 'the entire school timetable'
+    const confirmed = await confirmAction(
+      `Delete ${scopeLabel}? This removes ${filteredSlots.length} entr${filteredSlots.length === 1 ? 'y' : 'ies'} and cannot be undone.`,
+      { danger: true, confirmLabel: 'Delete' }
+    )
+    if (!confirmed) return
+    const ids = filteredSlots.map((s) => s.id)
+    const { error } = await supabase.from('timetable_slots').delete().in('id', ids)
+    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
+    notify(`Deleted ${ids.length} entr${ids.length === 1 ? 'y' : 'ies'}.`)
+    loadAll()
+  }
+
   if (loading) return <div style={pageWrap}><p style={{ color: COLORS.muted }}>Loading...</p></div>
 
   return (
@@ -4459,7 +4480,7 @@ function TimetableScreen() {
         <button onClick={() => setManagePanel(managePanel === 'generate' ? null : 'generate')} style={managePanel === 'generate' ? btn : secondaryBtn}>Generate</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18, alignItems: 'flex-end' }}>
         <label style={fieldLabel}>Class
           <select value={classFilter} onChange={(e) => setClassFilter(e.target.value)} style={input}>
             <option value="all">All classes</option>
@@ -4472,6 +4493,9 @@ function TimetableScreen() {
             {teachers.map((t) => <option key={t.id} value={t.id}>{t.full_name}</option>)}
           </select>
         </label>
+        <button onClick={handleDeleteTimetable} style={{ ...secondaryBtn, color: COLORS.warn, borderColor: COLORS.warn, marginBottom: 14 }}>
+          {classFilter === 'all' && teacherFilter === 'all' ? 'Delete Timetable' : 'Delete Filtered Entries'}
+        </button>
       </div>
 
       {managePanel === 'add' && (
