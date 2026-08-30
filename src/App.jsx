@@ -373,7 +373,7 @@ function useIsNarrow() {
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const isLeadership = LEADERSHIP_TITLES.includes(title)
   const tabs = [
-    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Profiles',
+    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
     ...(isLeadership ? ['Enter Marks'] : []),
     'My Teaching', 'Approvals', 'Settings',
   ]
@@ -2424,7 +2424,7 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
 // ============================================================================
 function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const [showChangePw, setShowChangePw] = useState(false)
-  const [view, setView] = useState('marks') // 'marks' | 'attendance'
+  const [view, setView] = useState('marks') // 'marks' | 'attendance' | 'timetable'
   return (
     <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
       <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
@@ -2442,8 +2442,11 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
           <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
           <button onClick={() => setView('attendance')} style={view === 'attendance' ? btn : secondaryBtn}>Attendance</button>
+          <button onClick={() => setView('timetable')} style={view === 'timetable' ? btn : secondaryBtn}>My Timetable</button>
         </div>
-        {view === 'marks' ? <MarksEntryContent teacherId={teacherId} /> : <TeacherAttendanceScreen teacherId={teacherId} />}
+        {view === 'marks' && <MarksEntryContent teacherId={teacherId} />}
+        {view === 'attendance' && <TeacherAttendanceScreen teacherId={teacherId} />}
+        {view === 'timetable' && <TeacherTimetableScreen teacherId={teacherId} />}
       </div>
       {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
@@ -4042,6 +4045,653 @@ function TeacherAttendanceScreen({ teacherId }) {
 }
 
 // ============================================================================
+// TIMETABLE
+// ============================================================================
+// Tables this feature expects (create via Supabase SQL editor):
+//
+// create table timetable_periods (
+//   id uuid primary key default gen_random_uuid(),
+//   label text not null,            -- e.g. "Period 1"
+//   start_time time not null,
+//   end_time time not null,
+//   order_index int not null
+// );
+//
+// create table timetable_slots (
+//   id uuid primary key default gen_random_uuid(),
+//   day_of_week int not null,       -- 1=Mon .. 5=Fri
+//   period_id uuid references timetable_periods(id),   -- null for a custom/flexible block
+//   start_time time not null,
+//   end_time time not null,
+//   class_label text not null,
+//   subject_id uuid references subjects(id),
+//   teacher_id uuid references profiles(id),
+//   room text,
+//   source text default 'manual',   -- 'manual' | 'import' | 'generated'
+//   created_at timestamptz default now()
+// );
+
+const TIMETABLE_DAYS = [
+  { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' },
+  { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' },
+  { value: 5, label: 'Friday' },
+]
+
+function ttToMinutes(t) {
+  if (!t) return 0
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + (m || 0)
+}
+function ttOverlap(aStart, aEnd, bStart, bEnd) {
+  return ttToMinutes(aStart) < ttToMinutes(bEnd) && ttToMinutes(bStart) < ttToMinutes(aEnd)
+}
+// Conflicts = same day + overlapping time + (same teacher OR same room OR same class)
+function ttFindConflicts(candidate, existingSlots, excludeId) {
+  return existingSlots.filter((s) => {
+    if (s.id === excludeId) return false
+    if (Number(s.day_of_week) !== Number(candidate.day_of_week)) return false
+    if (!ttOverlap(s.start_time, s.end_time, candidate.start_time, candidate.end_time)) return false
+    const sameTeacher = candidate.teacher_id && s.teacher_id === candidate.teacher_id
+    const sameRoom = candidate.room && s.room && s.room.trim().toLowerCase() === candidate.room.trim().toLowerCase()
+    const sameClass = s.class_label === candidate.class_label
+    return sameTeacher || sameRoom || sameClass
+  })
+}
+function ttConflictReason(conflict, candidate) {
+  if (conflict.teacher_id === candidate.teacher_id) return 'teacher already booked'
+  if (candidate.room && conflict.room && conflict.room.trim().toLowerCase() === candidate.room.trim().toLowerCase()) return 'room already booked'
+  return 'class already has a lesson then'
+}
+// Looks across every defined period (any day) for the closest slot, same duration,
+// that produces zero conflicts for this teacher/room/class.
+function ttSuggestNearestSlot(candidate, existingSlots, periods, excludeId) {
+  const candidates = periods.length > 0
+    ? periods.map((p) => ({ day_of_week: candidate.day_of_week, start_time: p.start_time, end_time: p.end_time, period_id: p.id }))
+    : []
+  // Prefer same day first, then other days; within a day, closest start time first.
+  const scored = candidates
+    .map((c) => ({
+      ...c,
+      sameDay: c.day_of_week === candidate.day_of_week ? 0 : 1,
+      diff: Math.abs(ttToMinutes(c.start_time) - ttToMinutes(candidate.start_time)),
+    }))
+    .sort((a, b) => a.sameDay - b.sameDay || a.diff - b.diff)
+  for (const c of scored) {
+    const test = { ...candidate, day_of_week: c.day_of_week, start_time: c.start_time, end_time: c.end_time, period_id: c.period_id }
+    if (ttFindConflicts(test, existingSlots, excludeId).length === 0) return test
+  }
+  return null
+}
+
+// ---- Shared grid renderer (used by both admin and teacher views) ----
+function TimetableGrid({ periods, slots, days = TIMETABLE_DAYS, renderCell }) {
+  const gridSlots = slots.filter((s) => s.period_id)
+  const customSlots = slots.filter((s) => !s.period_id)
+  return (
+    <>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={th}>Period</th>
+              {days.map((d) => <th key={d.value} style={th}>{d.label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {periods.length === 0 && (
+              <tr><td colSpan={days.length + 1} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No periods defined yet — add them under Manage.</td></tr>
+            )}
+            {periods.map((p) => (
+              <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                <td style={{ ...td, whiteSpace: 'nowrap', color: COLORS.muted, fontSize: 12 }}>{p.label}<br /><span style={{ fontSize: 10.5 }}>{p.start_time}–{p.end_time}</span></td>
+                {days.map((d) => {
+                  const cellSlots = gridSlots.filter((s) => s.period_id === p.id && Number(s.day_of_week) === d.value)
+                  return <td key={d.value} style={{ ...td, verticalAlign: 'top', minWidth: 120 }}>{cellSlots.map((s) => renderCell(s))}</td>
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {customSlots.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={sectionLabel}>Other time blocks (flexible)</div>
+          {days.map((d) => {
+            const daySlots = customSlots.filter((s) => Number(s.day_of_week) === d.value).sort((a, b) => ttToMinutes(a.start_time) - ttToMinutes(b.start_time))
+            if (daySlots.length === 0) return null
+            return (
+              <div key={d.value} style={{ marginBottom: 8, fontSize: 12.5 }}>
+                <strong style={{ color: COLORS.ink }}>{d.label}: </strong>
+                {daySlots.map((s, i) => <span key={s.id}>{i > 0 && ', '}{s.start_time}–{s.end_time} {renderCell(s, true)}</span>)}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </>
+  )
+}
+
+function TimetableListView({ slots, renderRowExtra }) {
+  const sorted = [...slots].sort((a, b) => a.day_of_week - b.day_of_week || ttToMinutes(a.start_time) - ttToMinutes(b.start_time))
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+      <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse' }}>
+        <thead><tr><th style={th}>Day</th><th style={th}>Time</th><th style={th}>Class</th><th style={th}>Subject</th><th style={th}>Teacher</th><th style={th}>Room</th><th style={th}></th></tr></thead>
+        <tbody>
+          {sorted.map((s) => (
+            <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+              <td style={td}>{TIMETABLE_DAYS.find((d) => d.value === Number(s.day_of_week))?.label}</td>
+              <td style={td}>{s.start_time}–{s.end_time}</td>
+              <td style={td}>{CLASS_OPTIONS.find((c) => c.value === s.class_label)?.label || s.class_label}</td>
+              <td style={td}>{s.subjects?.name || '—'}</td>
+              <td style={td}>{s.profiles?.full_name || '—'}</td>
+              <td style={td}>{s.room || '—'}</td>
+              <td style={{ ...td, textAlign: 'right' }}>{renderRowExtra ? renderRowExtra(s) : null}</td>
+            </tr>
+          ))}
+          {sorted.length === 0 && <tr><td colSpan={7} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No timetable entries yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function TimetableScreen() {
+  const { notify, confirmAction } = useNotify()
+  const [loading, setLoading] = useState(true)
+  const [periods, setPeriods] = useState([])
+  const [slots, setSlots] = useState([])
+  const [subjects, setSubjects] = useState([])
+  const [teachers, setTeachers] = useState([])
+  const [assignments, setAssignments] = useState([])
+  const [viewMode, setViewMode] = useState('grid') // 'grid' | 'list'
+  const [managePanel, setManagePanel] = useState(null) // null | 'add' | 'periods' | 'import' | 'generate'
+  const [classFilter, setClassFilter] = useState('all')
+  const [teacherFilter, setTeacherFilter] = useState('all')
+
+  useEffect(() => { loadAll() }, [])
+
+  async function loadAll() {
+    setLoading(true)
+    const [{ data: periodData }, { data: slotData }, { data: subjectData }, { data: teacherData }, { data: assignData }] = await Promise.all([
+      supabase.from('timetable_periods').select('*').order('order_index'),
+      supabase.from('timetable_slots').select('*, subjects(name), profiles(full_name)').order('day_of_week'),
+      supabase.from('subjects').select('*').order('name'),
+      supabase.from('profiles').select('id, full_name, role').eq('status', 'approved').order('full_name'),
+      supabase.from('teacher_assignments').select('*, subjects(name), profiles(full_name)'),
+    ])
+    setPeriods(periodData || [])
+    setSlots(slotData || [])
+    setSubjects(subjectData || [])
+    setTeachers(teacherData || [])
+    setAssignments(assignData || [])
+    setLoading(false)
+  }
+
+  const filteredSlots = slots.filter((s) =>
+    (classFilter === 'all' || s.class_label === classFilter) &&
+    (teacherFilter === 'all' || s.teacher_id === teacherFilter)
+  )
+
+  async function insertSlot(candidate, { allowSuggestion = true } = {}) {
+    const conflicts = ttFindConflicts(candidate, slots, candidate.id)
+    if (conflicts.length > 0) {
+      const reasons = [...new Set(conflicts.map((c) => ttConflictReason(c, candidate)))].join(', ')
+      if (!allowSuggestion) { notify(`Conflict: ${reasons}.`, 'error'); return false }
+      const suggestion = ttSuggestNearestSlot(candidate, slots, periods, candidate.id)
+      if (!suggestion) { notify(`Conflict (${reasons}) and no free slot could be found.`, 'error'); return false }
+      const dayLabel = TIMETABLE_DAYS.find((d) => d.value === suggestion.day_of_week)?.label
+      const useIt = await confirmAction(
+        `Conflict: ${reasons}. Use the nearest available slot instead — ${dayLabel} ${suggestion.start_time}–${suggestion.end_time}?`,
+        { confirmLabel: 'Use suggested slot' }
+      )
+      if (!useIt) return false
+      candidate = suggestion
+    }
+    const { error } = await supabase.from('timetable_slots').insert({
+      day_of_week: candidate.day_of_week, period_id: candidate.period_id || null,
+      start_time: candidate.start_time, end_time: candidate.end_time,
+      class_label: candidate.class_label, subject_id: candidate.subject_id,
+      teacher_id: candidate.teacher_id, room: candidate.room || null,
+      source: candidate.source || 'manual',
+    })
+    if (error) { notify(`Couldn't save: ${error.message}`, 'error'); return false }
+    return true
+  }
+
+  async function handleDeleteSlot(slot) {
+    const confirmed = await confirmAction('Remove this timetable entry?', { danger: true, confirmLabel: 'Remove' })
+    if (!confirmed) return
+    const { error } = await supabase.from('timetable_slots').delete().eq('id', slot.id)
+    if (error) { notify(`Couldn't remove: ${error.message}`, 'error'); return }
+    notify('Removed.')
+    loadAll()
+  }
+
+  if (loading) return <div style={pageWrap}><p style={{ color: COLORS.muted }}>Loading...</p></div>
+
+  return (
+    <div style={pageWrap}>
+      <h2 style={{ marginBottom: 4 }}>Timetable</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 18 }}>Build the school timetable by hand, import it, or generate a draft. Conflicts are blocked automatically.</p>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+        <button onClick={() => setViewMode('grid')} style={viewMode === 'grid' ? btn : secondaryBtn}>Grid view</button>
+        <button onClick={() => setViewMode('list')} style={viewMode === 'list' ? btn : secondaryBtn}>List view</button>
+        <span style={{ width: 1, background: COLORS.ruleLight, margin: '0 4px' }} />
+        <button onClick={() => setManagePanel(managePanel === 'add' ? null : 'add')} style={managePanel === 'add' ? btn : secondaryBtn}>+ Add Entry</button>
+        <button onClick={() => setManagePanel(managePanel === 'periods' ? null : 'periods')} style={managePanel === 'periods' ? btn : secondaryBtn}>Periods</button>
+        <button onClick={() => setManagePanel(managePanel === 'import' ? null : 'import')} style={managePanel === 'import' ? btn : secondaryBtn}>Import</button>
+        <button onClick={() => setManagePanel(managePanel === 'generate' ? null : 'generate')} style={managePanel === 'generate' ? btn : secondaryBtn}>Generate</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+        <label style={fieldLabel}>Class
+          <select value={classFilter} onChange={(e) => setClassFilter(e.target.value)} style={input}>
+            <option value="all">All classes</option>
+            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Teacher
+          <select value={teacherFilter} onChange={(e) => setTeacherFilter(e.target.value)} style={input}>
+            <option value="all">All teachers</option>
+            {teachers.map((t) => <option key={t.id} value={t.id}>{t.full_name}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {managePanel === 'add' && (
+        <TimetableAddForm
+          periods={periods} subjects={subjects} teachers={teachers} assignments={assignments}
+          onSubmit={async (candidate) => { const ok = await insertSlot(candidate); if (ok) { notify('Entry added.'); loadAll() } }}
+        />
+      )}
+      {managePanel === 'periods' && <TimetablePeriodsManager periods={periods} onChanged={loadAll} />}
+      {managePanel === 'import' && (
+        <TimetableImportPanel
+          periods={periods} subjects={subjects} teachers={teachers} existingSlots={slots}
+          onDone={() => { setManagePanel(null); loadAll() }}
+        />
+      )}
+      {managePanel === 'generate' && (
+        <TimetableGenerator
+          periods={periods} assignments={assignments} existingSlots={slots}
+          onDone={() => { setManagePanel(null); loadAll() }}
+        />
+      )}
+
+      <div style={{ marginTop: 20 }}>
+        {viewMode === 'grid' ? (
+          <TimetableGrid
+            periods={periods} slots={filteredSlots}
+            renderCell={(s, inline) => (
+              <div key={s.id} style={{ background: COLORS.accentSoft, borderRadius: 6, padding: '4px 8px', marginBottom: inline ? 0 : 4, fontSize: 12, display: inline ? 'inline-block' : 'block' }}>
+                <div style={{ fontWeight: 700 }}>{s.subjects?.name || '—'} · {CLASS_OPTIONS.find((c) => c.value === s.class_label)?.label || s.class_label}</div>
+                <div style={{ color: COLORS.muted }}>{s.profiles?.full_name || '—'}{s.room ? ` · ${s.room}` : ''}</div>
+                <button onClick={() => handleDeleteSlot(s)} style={{ background: 'none', border: 'none', color: COLORS.warn, cursor: 'pointer', fontSize: 11, padding: 0 }}>Remove</button>
+              </div>
+            )}
+          />
+        ) : (
+          <TimetableListView slots={filteredSlots} renderRowExtra={(s) => (
+            <button onClick={() => handleDeleteSlot(s)} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Remove</button>
+          )} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TimetableAddForm({ periods, subjects, teachers, assignments, onSubmit }) {
+  const [day, setDay] = useState(1)
+  const [timeMode, setTimeMode] = useState(periods.length > 0 ? 'period' : 'custom')
+  const [periodId, setPeriodId] = useState(periods[0]?.id || '')
+  const [customStart, setCustomStart] = useState('08:00')
+  const [customEnd, setCustomEnd] = useState('08:40')
+  const [classLabel, setClassLabel] = useState(CLASS_OPTIONS[0].value)
+  const [subjectId, setSubjectId] = useState('')
+  const [teacherId, setTeacherId] = useState('')
+  const [room, setRoom] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Narrow the teacher list to whoever is actually assigned this subject+class, if that's on record
+  const suggestedTeachers = assignments.filter((a) => a.subject_id === subjectId && a.class_label === classLabel)
+
+  async function handleSubmit() {
+    if (!subjectId || !teacherId) return
+    const period = periods.find((p) => p.id === periodId)
+    const start_time = timeMode === 'period' ? period?.start_time : customStart
+    const end_time = timeMode === 'period' ? period?.end_time : customEnd
+    if (!start_time || !end_time) return
+    setSaving(true)
+    await onSubmit({
+      day_of_week: day, period_id: timeMode === 'period' ? periodId : null,
+      start_time, end_time, class_label: classLabel, subject_id: subjectId, teacher_id: teacherId, room,
+    })
+    setSaving(false)
+  }
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 18 }}>
+      <div style={sectionLabel}>Add a timetable entry</div>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <label style={fieldLabel}>Day
+          <select value={day} onChange={(e) => setDay(Number(e.target.value))} style={input}>
+            {TIMETABLE_DAYS.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Time type
+          <select value={timeMode} onChange={(e) => setTimeMode(e.target.value)} style={input}>
+            <option value="period">Fixed period</option>
+            <option value="custom">Custom time block</option>
+          </select>
+        </label>
+        {timeMode === 'period' ? (
+          <label style={fieldLabel}>Period
+            <select value={periodId} onChange={(e) => setPeriodId(e.target.value)} style={input}>
+              {periods.map((p) => <option key={p.id} value={p.id}>{p.label} ({p.start_time}–{p.end_time})</option>)}
+            </select>
+          </label>
+        ) : (
+          <>
+            <label style={fieldLabel}>Start<input type="time" value={customStart} onChange={(e) => setCustomStart(e.target.value)} style={input} /></label>
+            <label style={fieldLabel}>End<input type="time" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} style={input} /></label>
+          </>
+        )}
+        <label style={fieldLabel}>Class
+          <select value={classLabel} onChange={(e) => setClassLabel(e.target.value)} style={input}>
+            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Subject
+          <select value={subjectId} onChange={(e) => setSubjectId(e.target.value)} style={input}>
+            <option value="">Select subject</option>
+            {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Teacher
+          <select value={teacherId} onChange={(e) => setTeacherId(e.target.value)} style={input}>
+            <option value="">Select teacher</option>
+            {suggestedTeachers.length > 0 && <optgroup label="Assigned to this class/subject">
+              {suggestedTeachers.map((a) => <option key={a.teacher_id} value={a.teacher_id}>{a.profiles?.full_name}</option>)}
+            </optgroup>}
+            <optgroup label="All staff">
+              {teachers.map((t) => <option key={t.id} value={t.id}>{t.full_name}</option>)}
+            </optgroup>
+          </select>
+        </label>
+        <label style={fieldLabel}>Room (optional)<input value={room} onChange={(e) => setRoom(e.target.value)} style={input} placeholder="e.g. Lab 2" /></label>
+      </div>
+      <button onClick={handleSubmit} disabled={saving || !subjectId || !teacherId} style={btn}>{saving ? 'Saving...' : '+ Add Entry'}</button>
+    </div>
+  )
+}
+
+function TimetablePeriodsManager({ periods, onChanged }) {
+  const { notify, confirmAction } = useNotify()
+  const [label, setLabel] = useState('')
+  const [start, setStart] = useState('08:00')
+  const [end, setEnd] = useState('08:40')
+  const [saving, setSaving] = useState(false)
+
+  async function addPeriod() {
+    if (!label.trim()) return
+    setSaving(true)
+    const nextOrder = periods.length > 0 ? Math.max(...periods.map((p) => p.order_index)) + 1 : 1
+    const { error } = await supabase.from('timetable_periods').insert({ label: label.trim(), start_time: start, end_time: end, order_index: nextOrder })
+    setSaving(false)
+    if (error) { notify(`Couldn't add: ${error.message}`, 'error'); return }
+    setLabel('')
+    onChanged()
+  }
+
+  async function removePeriod(id) {
+    const confirmed = await confirmAction('Remove this period? Any grid entries in it will need a new time.', { danger: true, confirmLabel: 'Remove' })
+    if (!confirmed) return
+    const { error } = await supabase.from('timetable_periods').delete().eq('id', id)
+    if (error) { notify(`Couldn't remove: ${error.message}`, 'error'); return }
+    onChanged()
+  }
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 18 }}>
+      <div style={sectionLabel}>Define fixed periods (e.g. Period 1–8)</div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+        <label style={fieldLabel}>Label<input value={label} onChange={(e) => setLabel(e.target.value)} style={input} placeholder="Period 1" /></label>
+        <label style={fieldLabel}>Start<input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={input} /></label>
+        <label style={fieldLabel}>End<input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={input} /></label>
+      </div>
+      <button onClick={addPeriod} disabled={saving} style={secondaryBtn}>{saving ? 'Adding...' : '+ Add Period'}</button>
+      <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {periods.map((p) => (
+          <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 6 }}>
+            <span>{p.label} — {p.start_time}–{p.end_time}</span>
+            <button onClick={() => removePeriod(p.id)} style={{ background: 'none', border: 'none', color: COLORS.warn, cursor: 'pointer', fontSize: 12 }}>Remove</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Expected CSV columns: day, period_label (or start_time,end_time), class, subject, teacher_username, room
+function TimetableImportPanel({ periods, subjects, teachers, existingSlots, onDone }) {
+  const { notify } = useNotify()
+  const [file, setFile] = useState(null)
+  const [importing, setImporting] = useState(false)
+  const [summary, setSummary] = useState(null)
+
+  async function handleImport() {
+    if (!file) return
+    setImporting(true)
+    Papa.parse(file, {
+      header: true, skipEmptyLines: true,
+      complete: async (results) => {
+        const workingSlots = [...existingSlots]
+        let added = 0, adjusted = 0, failed = []
+        for (const row of results.data) {
+          const dayMatch = TIMETABLE_DAYS.find((d) => d.label.toLowerCase() === (row.day || '').trim().toLowerCase())
+          const subject = subjects.find((s) => s.name.toLowerCase() === (row.subject || '').trim().toLowerCase())
+          const teacher = teachers.find((t) => t.full_name.toLowerCase() === (row.teacher_username || row.teacher || '').trim().toLowerCase())
+          const period = periods.find((p) => p.label.toLowerCase() === (row.period_label || '').trim().toLowerCase())
+          const start_time = period?.start_time || row.start_time
+          const end_time = period?.end_time || row.end_time
+          const classLabel = CLASS_OPTIONS.find((c) => c.value === row.class || c.label.toLowerCase() === (row.class || '').trim().toLowerCase())?.value
+
+          if (!dayMatch || !subject || !teacher || !start_time || !end_time || !classLabel) {
+            failed.push(`Row skipped (missing/unmatched data): ${JSON.stringify(row)}`)
+            continue
+          }
+          let candidate = { day_of_week: dayMatch.value, period_id: period?.id || null, start_time, end_time, class_label: classLabel, subject_id: subject.id, teacher_id: teacher.id, room: row.room || null, source: 'import' }
+          const conflicts = ttFindConflicts(candidate, workingSlots, null)
+          if (conflicts.length > 0) {
+            const suggestion = ttSuggestNearestSlot(candidate, workingSlots, periods, null)
+            if (!suggestion) { failed.push(`${row.subject} / ${row.class} on ${row.day}: conflict, no free slot found`); continue }
+            candidate = suggestion
+            adjusted++
+          }
+          const { data, error } = await supabase.from('timetable_slots').insert({
+            day_of_week: candidate.day_of_week, period_id: candidate.period_id, start_time: candidate.start_time,
+            end_time: candidate.end_time, class_label: candidate.class_label, subject_id: candidate.subject_id,
+            teacher_id: candidate.teacher_id, room: candidate.room, source: 'import',
+          }).select().single()
+          if (error) { failed.push(`${row.subject} / ${row.class}: ${error.message}`); continue }
+          workingSlots.push({ ...candidate, id: data.id })
+          added++
+        }
+        setImporting(false)
+        setSummary({ added, adjusted, failed })
+        notify(`Imported ${added} entr${added === 1 ? 'y' : 'ies'}${adjusted > 0 ? ` (${adjusted} moved to avoid a conflict)` : ''}.`)
+      },
+    })
+  }
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 18 }}>
+      <div style={sectionLabel}>Import from CSV</div>
+      <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>
+        Columns: day, period_label (or start_time/end_time), class, subject, teacher_username, room. Teacher must match a staff member's full name exactly.
+      </p>
+      <input type="file" accept=".csv" onChange={(e) => setFile(e.target.files[0])} style={input} />
+      <button onClick={handleImport} disabled={!file || importing} style={btn}>{importing ? 'Importing...' : 'Import CSV'}</button>
+      {summary && (
+        <div style={{ marginTop: 12, fontSize: 12.5 }}>
+          <div style={{ color: COLORS.good }}>{summary.added} added{summary.adjusted > 0 ? `, ${summary.adjusted} auto-adjusted for conflicts` : ''}.</div>
+          {summary.failed.length > 0 && (
+            <div style={{ color: COLORS.warn, marginTop: 6 }}>
+              {summary.failed.length} skipped:
+              <ul style={{ margin: '4px 0 0 18px' }}>{summary.failed.map((f, i) => <li key={i}>{f}</li>)}</ul>
+            </div>
+          )}
+          <button onClick={onDone} style={{ ...secondaryBtn, marginTop: 10 }}>Done</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Heuristic generator: for each teacher assignment, place the requested number
+// of periods/week into the first conflict-free day+period slot available.
+// The instructions box is stored for reference but is NOT parsed by AI in this
+// version — it's a place to note constraints for whoever reviews the draft.
+function TimetableGenerator({ periods, assignments, existingSlots, onDone }) {
+  const { notify, confirmAction } = useNotify()
+  const [perWeek, setPerWeek] = useState(() => Object.fromEntries(assignments.map((a) => [`${a.teacher_id}-${a.subject_id}-${a.class_label}`, 3])))
+  const [instructions, setInstructions] = useState('')
+  const [replaceGenerated, setReplaceGenerated] = useState(true)
+  const [generating, setGenerating] = useState(false)
+  const [result, setResult] = useState(null)
+
+  async function handleGenerate() {
+    if (periods.length === 0) { notify('Add at least one period first, under Manage → Periods.', 'error'); return }
+    setGenerating(true)
+    let working = replaceGenerated ? existingSlots.filter((s) => s.source !== 'generated') : [...existingSlots]
+    if (replaceGenerated) {
+      await supabase.from('timetable_slots').delete().eq('source', 'generated')
+    }
+    const toInsert = []
+    const unplaced = []
+    for (const a of assignments) {
+      const key = `${a.teacher_id}-${a.subject_id}-${a.class_label}`
+      const need = perWeek[key] || 0
+      let placed = 0
+      for (const day of TIMETABLE_DAYS) {
+        if (placed >= need) break
+        for (const p of periods) {
+          if (placed >= need) break
+          const candidate = { day_of_week: day.value, period_id: p.id, start_time: p.start_time, end_time: p.end_time, class_label: a.class_label, subject_id: a.subject_id, teacher_id: a.teacher_id, room: null }
+          if (ttFindConflicts(candidate, working, null).length === 0) {
+            working.push({ ...candidate, id: `pending-${toInsert.length}` })
+            toInsert.push({ ...candidate, source: 'generated' })
+            placed++
+          }
+        }
+      }
+      if (placed < need) unplaced.push(`${a.subjects?.name} · ${a.profiles?.full_name} (${placed}/${need} placed)`)
+    }
+    if (toInsert.length > 0) {
+      const { error } = await supabase.from('timetable_slots').insert(toInsert)
+      if (error) { setGenerating(false); notify(`Couldn't save generated slots: ${error.message}`, 'error'); return }
+    }
+    setGenerating(false)
+    setResult({ placed: toInsert.length, unplaced })
+    notify(`Generated ${toInsert.length} entries.`)
+  }
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 18 }}>
+      <div style={sectionLabel}>Generate a draft timetable</div>
+      <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>
+        Set periods/week per assignment, add any notes for whoever reviews the draft, then generate. It fills conflict-free slots automatically — review and adjust afterward.
+      </p>
+      <div style={{ maxHeight: 220, overflowY: 'auto', marginBottom: 12 }}>
+        {assignments.map((a) => {
+          const key = `${a.teacher_id}-${a.subject_id}-${a.class_label}`
+          return (
+            <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12.5, borderTop: `1px solid ${COLORS.ruleLight}`, padding: '6px 0' }}>
+              <span>{a.subjects?.name} · {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label} · {a.profiles?.full_name}</span>
+              <input type="number" min={0} value={perWeek[key] ?? 0} onChange={(e) => setPerWeek((prev) => ({ ...prev, [key]: Number(e.target.value) }))} style={{ ...input, width: 56, marginBottom: 0, padding: '4px 6px' }} />
+            </div>
+          )
+        })}
+        {assignments.length === 0 && <p style={{ color: COLORS.muted, fontSize: 12.5 }}>No teacher assignments found yet.</p>}
+      </div>
+      <label style={fieldLabel}>Notes / instructions (kept for reference, not auto-applied)
+        <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} style={{ ...input, minHeight: 60 }} placeholder="e.g. avoid double Maths on Fridays" />
+      </label>
+      <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+        <input type="checkbox" checked={replaceGenerated} onChange={(e) => setReplaceGenerated(e.target.checked)} />
+        Replace any previously generated entries (manual/imported entries are untouched)
+      </label>
+      <button onClick={handleGenerate} disabled={generating} style={btn}>{generating ? 'Generating...' : 'Generate Timetable'}</button>
+      {result && (
+        <div style={{ marginTop: 12, fontSize: 12.5 }}>
+          <div style={{ color: COLORS.good }}>{result.placed} entries placed.</div>
+          {result.unplaced.length > 0 && (
+            <div style={{ color: COLORS.warn, marginTop: 6 }}>
+              Couldn't fully place: <ul style={{ margin: '4px 0 0 18px' }}>{result.unplaced.map((u, i) => <li key={i}>{u}</li>)}</ul>
+            </div>
+          )}
+          <button onClick={onDone} style={{ ...secondaryBtn, marginTop: 10 }}>Done</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- TEACHER: read-only view of their own timetable ----
+function TeacherTimetableScreen({ teacherId }) {
+  const [loading, setLoading] = useState(true)
+  const [periods, setPeriods] = useState([])
+  const [slots, setSlots] = useState([])
+  const [viewMode, setViewMode] = useState('grid')
+
+  useEffect(() => { loadMine() }, [teacherId])
+
+  async function loadMine() {
+    setLoading(true)
+    const [{ data: periodData }, { data: slotData }] = await Promise.all([
+      supabase.from('timetable_periods').select('*').order('order_index'),
+      supabase.from('timetable_slots').select('*, subjects(name), profiles(full_name)').eq('teacher_id', teacherId).order('day_of_week'),
+    ])
+    setPeriods(periodData || [])
+    setSlots(slotData || [])
+    setLoading(false)
+  }
+
+  if (loading) return <p style={{ color: COLORS.muted }}>Loading...</p>
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setViewMode('grid')} style={viewMode === 'grid' ? btn : secondaryBtn}>Grid view</button>
+        <button onClick={() => setViewMode('list')} style={viewMode === 'list' ? btn : secondaryBtn}>List view</button>
+      </div>
+      {slots.length === 0 ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No timetable entries for you yet.
+        </div>
+      ) : viewMode === 'grid' ? (
+        <TimetableGrid
+          periods={periods} slots={slots}
+          renderCell={(s, inline) => (
+            <div key={s.id} style={{ background: COLORS.accentSoft, borderRadius: 6, padding: '4px 8px', marginBottom: inline ? 0 : 4, fontSize: 12, display: inline ? 'inline-block' : 'block' }}>
+              <div style={{ fontWeight: 700 }}>{s.subjects?.name}</div>
+              <div style={{ color: COLORS.muted }}>{CLASS_OPTIONS.find((c) => c.value === s.class_label)?.label}{s.room ? ` · ${s.room}` : ''}</div>
+            </div>
+          )}
+        />
+      ) : (
+        <TimetableListView slots={slots} />
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
 // GATE SCREEN — checks school-wide activation before showing login/app
 // ============================================================================
 function GateScreen({ children }) {
@@ -4329,6 +4979,7 @@ function AppContent() {
             {tab === 'Reports' && <ReportsScreen />}
             {tab === 'Performance Track' && <PerformanceTrackScreen />}
             {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
+            {tab === 'Timetable' && <TimetableScreen />}
             {tab === 'Profiles' && <TeachersScreen currentUserId={profile.id} />}
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
