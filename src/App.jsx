@@ -125,6 +125,47 @@ function NotificationProvider({ children }) {
   )
 }
 
+// ============================================================================
+// CONCURRENT TIMETABLE GROUPS — Dean-defined subjects that must be
+// scheduled at the same day+period (e.g. Physics/Biology, or a CBC pathway
+// elective block). Stored per curriculum ('844' or 'cbc') so both grading
+// systems can have their own set, and surfaced on the Dean's Timetable
+// screen for visibility.
+// ============================================================================
+const ConcurrentGroupsContext = createContext(null)
+
+function useConcurrentGroups() {
+  const ctx = useContext(ConcurrentGroupsContext)
+  return ctx || { groupsByCurriculum: { '844': [], cbc: [] }, loading: false, reload: () => {} }
+}
+
+function ConcurrentGroupsProvider({ children }) {
+  const [groupsByCurriculum, setGroupsByCurriculum] = useState({ '844': [], cbc: [] })
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('timetable_concurrent_groups').select('*').order('label')
+    if (!error && data) {
+      setGroupsByCurriculum({
+        '844': data.filter((g) => g.curriculum === '844'),
+        cbc: data.filter((g) => g.curriculum === 'cbc'),
+      })
+    } else {
+      setGroupsByCurriculum({ '844': [], cbc: [] })
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  return (
+    <ConcurrentGroupsContext.Provider value={{ groupsByCurriculum, loading, reload }}>
+      {children}
+    </ConcurrentGroupsContext.Provider>
+  )
+}
+
 const CbcScaleContext = createContext(null)
 
 function useCbcScale() {
@@ -534,8 +575,11 @@ function ApprovalsScreen({ currentUserId }) {
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(true)
   const [actioningId, setActioningId] = useState(null)
+  const [pendingAssignments, setPendingAssignments] = useState([])
+  const [loadingAssignments, setLoadingAssignments] = useState(true)
+  const [actioningAssignmentId, setActioningAssignmentId] = useState(null)
 
-  useEffect(() => { loadPending() }, [])
+  useEffect(() => { loadPending(); loadPendingAssignments() }, [])
 
   async function loadPending() {
     setLoading(true)
@@ -544,6 +588,35 @@ function ApprovalsScreen({ currentUserId }) {
       .order('created_at', { ascending: true })
     if (!error) setPending(data)
     setLoading(false)
+  }
+
+  async function loadPendingAssignments() {
+    setLoadingAssignments(true)
+    const { data, error } = await supabase
+      .from('teacher_assignments')
+      .select('*, subjects(name), profiles(full_name)')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+    if (!error) setPendingAssignments(data || [])
+    setLoadingAssignments(false)
+  }
+
+  async function approveAssignment(id) {
+    setActioningAssignmentId(id)
+    const { error } = await supabase.from('teacher_assignments').update({ status: 'approved' }).eq('id', id)
+    setActioningAssignmentId(null)
+    if (error) { notify(`Couldn't approve: ${error.message}`, 'error'); return }
+    notify('Assignment approved — it can now be scheduled on the timetable.')
+    loadPendingAssignments()
+  }
+
+  async function rejectAssignment(id) {
+    setActioningAssignmentId(id)
+    const { error } = await supabase.from('teacher_assignments').update({ status: 'rejected' }).eq('id', id)
+    setActioningAssignmentId(null)
+    if (error) { notify(`Couldn't reject: ${error.message}`, 'error'); return }
+    notify('Assignment rejected.')
+    loadPendingAssignments()
   }
 
   async function approve(id) {
@@ -603,6 +676,38 @@ function ApprovalsScreen({ currentUserId }) {
                     <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                       <button onClick={() => reject(p.id)} disabled={actioningId === p.id} style={{ ...secondaryBtn, color: COLORS.warn, borderColor: COLORS.warn }}>Reject</button>
                       <button onClick={() => approve(p.id)} disabled={actioningId === p.id} style={btn}>{actioningId === p.id ? 'Working...' : 'Approve'}</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h2 style={{ marginTop: 32 }}>Pending Subject/Class Assignments</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
+        Teachers self-assign what they teach on first login. Approve each one here before it can be placed on the timetable.
+      </p>
+
+      {loadingAssignments ? <p style={{ color: COLORS.muted }}>Loading...</p> : pendingAssignments.length === 0 ? (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 24, textAlign: 'center', color: COLORS.muted, fontSize: 13 }}>
+          No pending assignments right now.
+        </div>
+      ) : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
+            <thead><tr><th style={th}>Teacher</th><th style={th}>Subject</th><th style={th}>Class</th><th style={th}></th></tr></thead>
+            <tbody>
+              {pendingAssignments.map((a) => (
+                <tr key={a.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                  <td style={td}>{a.profiles?.full_name}</td>
+                  <td style={td}>{a.subjects?.name}</td>
+                  <td style={{ ...td, color: COLORS.muted }}>{CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label || a.class_label}</td>
+                  <td style={{ ...td, textAlign: 'right' }}>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button onClick={() => rejectAssignment(a.id)} disabled={actioningAssignmentId === a.id} style={{ ...secondaryBtn, color: COLORS.warn, borderColor: COLORS.warn }}>Reject</button>
+                      <button onClick={() => approveAssignment(a.id)} disabled={actioningAssignmentId === a.id} style={btn}>{actioningAssignmentId === a.id ? 'Working...' : 'Approve'}</button>
                     </div>
                   </td>
                 </tr>
@@ -1938,6 +2043,12 @@ const CLASS_OPTIONS = [
   { value: 'grade_10', label: 'Grade 10' },
 ]
 
+// Which curriculum each class belongs to — used to pick the right set of
+// "concurrent subject" constraints (e.g. Physics/Biology run at the same
+// time) when generating the timetable.
+const CURRICULUM_FOR_CLASS = { form_3: '844', form_4: '844', grade_10: 'cbc' }
+const CURRICULUM_LABELS = { '844': '8-4-4 (Form 3/4)', cbc: 'CBC (Grade 10)' }
+
 function TeacherOnboarding({ teacherId, onDone }) {
   const [allSubjects, setAllSubjects] = useState([])
   const [assignments, setAssignments] = useState([{ subjectId: '', classLabel: '' }])
@@ -1967,6 +2078,7 @@ function TeacherOnboarding({ teacherId, onDone }) {
       teacher_id: teacherId,
       subject_id: a.subjectId,
       class_label: a.classLabel,
+      status: 'pending', // Dean of Studies must approve before this feeds the timetable generator
     }))
     const { error } = await supabase.from('teacher_assignments').insert(rows)
     if (error) {
@@ -1983,7 +2095,7 @@ function TeacherOnboarding({ teacherId, onDone }) {
       <div style={{ ...card, width: 480 }}>
         <h3>Welcome — one quick step</h3>
         <p style={{ fontSize: 13, color: COLORS.muted, marginBottom: 18 }}>
-          Tell us what you teach so you only see the right classes when entering marks.
+          Tell us what you teach so you only see the right classes when entering marks. You can start entering marks right away — the Dean of Studies will confirm these before they appear on the school timetable.
         </p>
 
         {assignments.map((a, i) => (
@@ -4104,6 +4216,64 @@ function ttConflictReason(conflict, candidate) {
   if (candidate.room && conflict.room && conflict.room.trim().toLowerCase() === candidate.room.trim().toLowerCase()) return 'room already booked'
   return 'class already has a lesson then'
 }
+// Same as ttFindConflicts, except two entries for the same class at the same
+// time are allowed if both subjects belong to the same concurrent elective
+// group (e.g. Physics/Biology, or the Computer Studies/Business/Agriculture
+// one-of block) — those genuinely run at the same time for different
+// students within the class. Teacher and room clashes are still blocked.
+function ttFindConflictsForGroup(candidate, existingSlots, excludeId, groupSubjectIds) {
+  return existingSlots.filter((s) => {
+    if (s.id === excludeId) return false
+    if (Number(s.day_of_week) !== Number(candidate.day_of_week)) return false
+    if (!ttOverlap(s.start_time, s.end_time, candidate.start_time, candidate.end_time)) return false
+    const sameTeacher = candidate.teacher_id && s.teacher_id === candidate.teacher_id
+    const sameRoom = candidate.room && s.room && s.room.trim().toLowerCase() === candidate.room.trim().toLowerCase()
+    const sameClassOutsideGroup = s.class_label === candidate.class_label && !groupSubjectIds.has(s.subject_id)
+    return sameTeacher || sameRoom || sameClassOutsideGroup
+  })
+}
+// Groups a class's approved assignments into concurrent blocks (subjects
+// scheduled at the same day+period). `dbGroups` are the Dean-defined
+// concurrent groups for this class's curriculum (from
+// timetable_concurrent_groups, matched by subject_id). If none are defined
+// yet, falls back to the legacy hardcoded 8-4-4 pairs (Physics/Biology,
+// Geography/History) and the Computer Studies/Business/Agriculture elective
+// block, matched by subject name, so existing 8-4-4 schools keep working
+// with zero setup. Everything left over (compulsory or unlisted subjects)
+// becomes its own single-member group.
+function ttBuildSubjectGroups(classAssignments, dbGroups) {
+  const used = new Set()
+  const groups = []
+
+  if (dbGroups && dbGroups.length > 0) {
+    for (const g of dbGroups) {
+      const subjectIdSet = new Set(g.subject_ids || [])
+      const members = classAssignments.filter((a) => subjectIdSet.has(a.subject_id) && !used.has(a))
+      if (members.length > 0) {
+        members.forEach((m) => used.add(m))
+        groups.push({ members, subjectIds: new Set(members.map((m) => m.subject_id)), label: g.label, concurrent: true })
+      }
+    }
+  } else {
+    for (const pair of EXCLUSION_PAIRS) {
+      const members = classAssignments.filter((a) => pair.includes(a.subjects?.name) && !used.has(a))
+      if (members.length > 0) {
+        members.forEach((m) => used.add(m))
+        groups.push({ members, subjectIds: new Set(members.map((m) => m.subject_id)), label: pair.join(' / '), concurrent: true })
+      }
+    }
+    const oneOfMembers = classAssignments.filter((a) => ONE_OF_GROUP.includes(a.subjects?.name) && !used.has(a))
+    if (oneOfMembers.length > 0) {
+      oneOfMembers.forEach((m) => used.add(m))
+      groups.push({ members: oneOfMembers, subjectIds: new Set(oneOfMembers.map((m) => m.subject_id)), label: 'Elective (one of)', concurrent: true })
+    }
+  }
+
+  classAssignments.filter((a) => !used.has(a)).forEach((a) => {
+    groups.push({ members: [a], subjectIds: new Set([a.subject_id]), label: a.subjects?.name, concurrent: false })
+  })
+  return groups
+}
 // Looks across every defined period (any day) for the closest slot, same duration,
 // that produces zero conflicts for this teacher/room/class.
 function ttSuggestNearestSlot(candidate, existingSlots, periods, excludeId) {
@@ -4208,7 +4378,7 @@ function TimetableScreen() {
   const [teachers, setTeachers] = useState([])
   const [assignments, setAssignments] = useState([])
   const [viewMode, setViewMode] = useState('grid') // 'grid' | 'list'
-  const [managePanel, setManagePanel] = useState(null) // null | 'add' | 'periods' | 'import' | 'generate'
+  const [managePanel, setManagePanel] = useState(null) // null | 'add' | 'periods' | 'import' | 'concurrency' | 'generate'
   const [classFilter, setClassFilter] = useState('all')
   const [teacherFilter, setTeacherFilter] = useState('all')
 
@@ -4285,6 +4455,7 @@ function TimetableScreen() {
         <button onClick={() => setManagePanel(managePanel === 'add' ? null : 'add')} style={managePanel === 'add' ? btn : secondaryBtn}>+ Add Entry</button>
         <button onClick={() => setManagePanel(managePanel === 'periods' ? null : 'periods')} style={managePanel === 'periods' ? btn : secondaryBtn}>Periods</button>
         <button onClick={() => setManagePanel(managePanel === 'import' ? null : 'import')} style={managePanel === 'import' ? btn : secondaryBtn}>Import</button>
+        <button onClick={() => setManagePanel(managePanel === 'concurrency' ? null : 'concurrency')} style={managePanel === 'concurrency' ? btn : secondaryBtn}>Concurrency</button>
         <button onClick={() => setManagePanel(managePanel === 'generate' ? null : 'generate')} style={managePanel === 'generate' ? btn : secondaryBtn}>Generate</button>
       </div>
 
@@ -4316,9 +4487,10 @@ function TimetableScreen() {
           onDone={() => { setManagePanel(null); loadAll() }}
         />
       )}
+      {managePanel === 'concurrency' && <TimetableConcurrentGroupsManager subjects={subjects} />}
       {managePanel === 'generate' && (
         <TimetableGenerator
-          periods={periods} assignments={assignments} existingSlots={slots}
+          periods={periods} existingSlots={slots}
           onDone={() => { setManagePanel(null); loadAll() }}
         />
       )}
@@ -4557,47 +4729,221 @@ function TimetableImportPanel({ periods, subjects, teachers, existingSlots, onDo
 // of periods/week into the first conflict-free day+period slot available.
 // The instructions box is stored for reference but is NOT parsed by AI in this
 // version — it's a place to note constraints for whoever reviews the draft.
-function TimetableGenerator({ periods, assignments, existingSlots, onDone }) {
+// ---- Dean-facing manager for concurrent subject groups (per curriculum) ----
+function TimetableConcurrentGroupsManager({ subjects }) {
   const { notify, confirmAction } = useNotify()
-  const [perWeek, setPerWeek] = useState(() => Object.fromEntries(assignments.map((a) => [`${a.teacher_id}-${a.subject_id}-${a.class_label}`, 3])))
+  const { groupsByCurriculum, loading, reload } = useConcurrentGroups()
+  const [curriculum, setCurriculum] = useState('844')
+  const [label, setLabel] = useState('')
+  const [selectedSubjectIds, setSelectedSubjectIds] = useState([])
+  const [saving, setSaving] = useState(false)
+
+  const groups = groupsByCurriculum[curriculum] || []
+
+  function toggleSubject(id) {
+    setSelectedSubjectIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
+  async function handleAdd() {
+    if (!label.trim()) { notify('Give this group a name, e.g. "Physics / Biology".', 'error'); return }
+    if (selectedSubjectIds.length < 2) { notify('Pick at least two subjects that should run at the same time.', 'error'); return }
+    setSaving(true)
+    const { error } = await supabase.from('timetable_concurrent_groups').insert({
+      curriculum, label: label.trim(), subject_ids: selectedSubjectIds,
+    })
+    setSaving(false)
+    if (error) { notify(`Couldn't save: ${error.message}`, 'error'); return }
+    setLabel(''); setSelectedSubjectIds([])
+    notify('Concurrent group added.')
+    reload()
+  }
+
+  async function handleRemove(group) {
+    const confirmed = await confirmAction(`Remove "${group.label}"? Timetable generation will no longer treat these subjects as concurrent.`, { danger: true, confirmLabel: 'Remove' })
+    if (!confirmed) return
+    const { error } = await supabase.from('timetable_concurrent_groups').delete().eq('id', group.id)
+    if (error) { notify(`Couldn't remove: ${error.message}`, 'error'); return }
+    notify('Removed.')
+    reload()
+  }
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 18 }}>
+      <div style={sectionLabel}>Concurrent subject groups</div>
+      <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>
+        Subjects placed in the same group are scheduled at the same day + period (e.g. Physics/Biology, or a CBC pathway elective block) instead of getting their own slot. Defined separately for 8-4-4 and CBC since they don't share subjects.
+      </p>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        {['844', 'cbc'].map((curr) => (
+          <button key={curr} onClick={() => setCurriculum(curr)} style={curriculum === curr ? btn : secondaryBtn}>{CURRICULUM_LABELS[curr]}</button>
+        ))}
+      </div>
+
+      {loading ? (
+        <p style={{ color: COLORS.muted, fontSize: 12.5 }}>Loading...</p>
+      ) : (
+        <>
+          {curriculum === '844' && groups.length === 0 && (
+            <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>
+              No custom groups yet — the default 8-4-4 groups ({EXCLUSION_PAIRS.map((p) => p.join('/')).join(', ')}, and the Computer Studies/Business Studies/Agriculture elective) are used automatically. Add a group below to override them.
+            </p>
+          )}
+          {groups.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              {groups.map((g) => (
+                <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12.5, borderTop: `1px solid ${COLORS.ruleLight}`, padding: '8px 0' }}>
+                  <span>
+                    <strong>{g.label}</strong>
+                    <span style={{ color: COLORS.muted }}> — {(g.subject_ids || []).map((id) => subjects.find((s) => s.id === id)?.name || '?').join(', ')}</span>
+                  </span>
+                  <button onClick={() => handleRemove(g)} style={{ background: 'none', border: 'none', color: COLORS.warn, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 }}>Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <label style={fieldLabel}>New group name
+            <input value={label} onChange={(e) => setLabel(e.target.value)} style={input} placeholder="e.g. Physics / Biology" />
+          </label>
+          <div style={fieldLabel}>Subjects in this group (pick at least two)</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12, maxHeight: 160, overflowY: 'auto' }}>
+            {subjects.map((s) => (
+              <label key={s.id} style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 5, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6, padding: '4px 8px' }}>
+                <input type="checkbox" checked={selectedSubjectIds.includes(s.id)} onChange={() => toggleSubject(s.id)} />
+                {s.name}
+              </label>
+            ))}
+          </div>
+          <button onClick={handleAdd} disabled={saving} style={btn}>{saving ? 'Saving...' : '+ Add group'}</button>
+        </>
+      )}
+    </div>
+  )
+}
+
+function TimetableGenerator({ periods, existingSlots, onDone }) {
+  const { notify, confirmAction } = useNotify()
+  const { groupsByCurriculum } = useConcurrentGroups()
+  const [assignments, setAssignments] = useState([])
+  const [loadingAssignments, setLoadingAssignments] = useState(true)
+  const [perWeek, setPerWeek] = useState({})
   const [instructions, setInstructions] = useState('')
   const [replaceGenerated, setReplaceGenerated] = useState(true)
+  const [fillEverySlot, setFillEverySlot] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [result, setResult] = useState(null)
 
+  // Only Dean-approved teacher/subject/class assignments are eligible for
+  // generation — a freshly self-assigned teacher won't show up here until
+  // the Dean approves them under Approvals.
+  useEffect(() => {
+    setLoadingAssignments(true)
+    supabase
+      .from('teacher_assignments')
+      .select('*, subjects(name), profiles(full_name)')
+      .eq('status', 'approved')
+      .then(({ data }) => {
+        const approved = data || []
+        setAssignments(approved)
+        setPerWeek(Object.fromEntries(approved.map((a) => [`${a.teacher_id}-${a.subject_id}-${a.class_label}`, 3])))
+        setLoadingAssignments(false)
+      })
+  }, [])
+
   async function handleGenerate() {
     if (periods.length === 0) { notify('Add at least one period first, under Manage → Periods.', 'error'); return }
+    if (assignments.length === 0) { notify('No Dean-approved teacher assignments yet — approve some under Approvals first.', 'error'); return }
     setGenerating(true)
     let working = replaceGenerated ? existingSlots.filter((s) => s.source !== 'generated') : [...existingSlots]
     if (replaceGenerated) {
       await supabase.from('timetable_slots').delete().eq('source', 'generated')
     }
     const toInsert = []
-    const unplaced = []
-    for (const a of assignments) {
-      const key = `${a.teacher_id}-${a.subject_id}-${a.class_label}`
-      const need = perWeek[key] || 0
-      let placed = 0
-      for (const day of TIMETABLE_DAYS) {
-        if (placed >= need) break
-        for (const p of periods) {
-          if (placed >= need) break
-          const candidate = { day_of_week: day.value, period_id: p.id, start_time: p.start_time, end_time: p.end_time, class_label: a.class_label, subject_id: a.subject_id, teacher_id: a.teacher_id, room: null }
-          if (ttFindConflicts(candidate, working, null).length === 0) {
+    const unplacedRequested = []
+    const classesFilled = {}
+    const classesWithNoAssignments = []
+
+    for (const c of CLASS_OPTIONS) {
+      const classAssignments = assignments.filter((a) => a.class_label === c.value)
+      const totalSlots = TIMETABLE_DAYS.length * periods.length
+      if (classAssignments.length === 0) {
+        classesWithNoAssignments.push(c.label)
+        classesFilled[c.label] = { filled: 0, total: totalSlots }
+        continue
+      }
+
+      const curriculum = CURRICULUM_FOR_CLASS[c.value]
+      const groups = ttBuildSubjectGroups(classAssignments, groupsByCurriculum[curriculum])
+
+      // Helper: places one occurrence of a group at the given day+period.
+      // Returns true if at least one member of the group got placed.
+      function placeGroupAt(group, day, p) {
+        let anyPlaced = false
+        for (const a of group.members) {
+          const candidate = { day_of_week: day.value, period_id: p.id, start_time: p.start_time, end_time: p.end_time, class_label: c.value, subject_id: a.subject_id, teacher_id: a.teacher_id, room: null }
+          if (ttFindConflictsForGroup(candidate, working, null, group.subjectIds).length === 0) {
             working.push({ ...candidate, id: `pending-${toInsert.length}` })
             toInsert.push({ ...candidate, source: 'generated' })
-            placed++
+            anyPlaced = true
+          }
+        }
+        return anyPlaced
+      }
+
+      // Pass 1: honor the periods/week requested for each group (elective
+      // groups use the highest number set among their members).
+      for (const group of groups) {
+        const need = Math.max(0, ...group.members.map((a) => perWeek[`${a.teacher_id}-${a.subject_id}-${a.class_label}`] ?? 0))
+        let placed = 0
+        for (const day of TIMETABLE_DAYS) {
+          if (placed >= need) break
+          for (const p of periods) {
+            if (placed >= need) break
+            if (placeGroupAt(group, day, p)) placed++
+          }
+        }
+        if (placed < need) unplacedRequested.push(`${group.label} · ${CLASS_OPTIONS.find((cc) => cc.value === c.value)?.label} (${placed}/${need} placed)`)
+      }
+
+      // Pass 2 (fillEverySlot): round-robin through this class's groups to
+      // occupy every day+period still completely empty for this class.
+      if (fillEverySlot) {
+        let rrIndex = 0
+        for (const day of TIMETABLE_DAYS) {
+          for (const p of periods) {
+            const alreadyThere = working.some((s) => s.class_label === c.value && Number(s.day_of_week) === day.value && ttOverlap(s.start_time, s.end_time, p.start_time, p.end_time))
+            if (alreadyThere) continue
+            let attempts = 0
+            while (attempts < groups.length) {
+              const group = groups[rrIndex % groups.length]
+              rrIndex++
+              attempts++
+              if (placeGroupAt(group, day, p)) break
+            }
           }
         }
       }
-      if (placed < need) unplaced.push(`${a.subjects?.name} · ${a.profiles?.full_name} (${placed}/${need} placed)`)
+
+      // Count distinct day+period cells now occupied for this class (a
+      // concurrent elective block still counts as one filled cell).
+      let filledCount = 0
+      for (const day of TIMETABLE_DAYS) {
+        for (const p of periods) {
+          if (working.some((s) => s.class_label === c.value && Number(s.day_of_week) === day.value && ttOverlap(s.start_time, s.end_time, p.start_time, p.end_time))) {
+            filledCount++
+          }
+        }
+      }
+      classesFilled[c.label] = { filled: filledCount, total: totalSlots }
     }
+
     if (toInsert.length > 0) {
       const { error } = await supabase.from('timetable_slots').insert(toInsert)
       if (error) { setGenerating(false); notify(`Couldn't save generated slots: ${error.message}`, 'error'); return }
     }
     setGenerating(false)
-    setResult({ placed: toInsert.length, unplaced })
+    setResult({ placed: toInsert.length, unplacedRequested, classesFilled, classesWithNoAssignments })
     notify(`Generated ${toInsert.length} entries.`)
   }
 
@@ -4608,33 +4954,90 @@ function TimetableGenerator({ periods, assignments, existingSlots, onDone }) {
         Set periods/week per assignment, add any notes for whoever reviews the draft, then generate. It fills conflict-free slots automatically — review and adjust afterward.
       </p>
       <div style={{ maxHeight: 220, overflowY: 'auto', marginBottom: 12 }}>
-        {assignments.map((a) => {
-          const key = `${a.teacher_id}-${a.subject_id}-${a.class_label}`
+        {loadingAssignments ? (
+          <p style={{ color: COLORS.muted, fontSize: 12.5 }}>Loading approved assignments...</p>
+        ) : assignments.length === 0 ? (
+          <p style={{ color: COLORS.muted, fontSize: 12.5 }}>
+            No Dean-approved teacher assignments yet. Teachers self-assign subjects/classes on first login, but a Dean of Studies needs to approve each one (under Approvals) before it can be scheduled.
+          </p>
+        ) : (
+          assignments.map((a) => {
+            const key = `${a.teacher_id}-${a.subject_id}-${a.class_label}`
+            return (
+              <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12.5, borderTop: `1px solid ${COLORS.ruleLight}`, padding: '6px 0' }}>
+                <span>{a.subjects?.name} · {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label} · {a.profiles?.full_name}</span>
+                <input type="number" min={0} value={perWeek[key] ?? 0} onChange={(e) => setPerWeek((prev) => ({ ...prev, [key]: Number(e.target.value) }))} style={{ ...input, width: 56, marginBottom: 0, padding: '4px 6px' }} />
+              </div>
+            )
+          })
+        )}
+      </div>
+      <div style={{ background: COLORS.paper, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Concurrent subject constraints in use</div>
+        {['844', 'cbc'].map((curr) => {
+          const defs = groupsByCurriculum[curr] || []
+          const usingLegacyDefaults = curr === '844' && defs.length === 0
           return (
-            <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12.5, borderTop: `1px solid ${COLORS.ruleLight}`, padding: '6px 0' }}>
-              <span>{a.subjects?.name} · {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label} · {a.profiles?.full_name}</span>
-              <input type="number" min={0} value={perWeek[key] ?? 0} onChange={(e) => setPerWeek((prev) => ({ ...prev, [key]: Number(e.target.value) }))} style={{ ...input, width: 56, marginBottom: 0, padding: '4px 6px' }} />
+            <div key={curr} style={{ marginBottom: 6, fontSize: 12 }}>
+              <strong style={{ color: COLORS.ink }}>{CURRICULUM_LABELS[curr]}: </strong>
+              {defs.length > 0 ? (
+                <span style={{ color: COLORS.muted }}>{defs.map((g) => g.label).join(', ')}</span>
+              ) : usingLegacyDefaults ? (
+                <span style={{ color: COLORS.muted }}>{EXCLUSION_PAIRS.map((p) => p.join('/')).join(', ')}, Elective (one of): {ONE_OF_GROUP.join(', ')} (default)</span>
+              ) : (
+                <span style={{ color: COLORS.muted }}>None defined — every subject scheduled separately</span>
+              )}
             </div>
           )
         })}
-        {assignments.length === 0 && <p style={{ color: COLORS.muted, fontSize: 12.5 }}>No teacher assignments found yet.</p>}
+        <p style={{ color: COLORS.muted, fontSize: 11, marginTop: 4, marginBottom: 0 }}>
+          Manage these under Manage → Concurrency on the Timetable screen.
+        </p>
       </div>
+
       <label style={fieldLabel}>Notes / instructions (kept for reference, not auto-applied)
         <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} style={{ ...input, minHeight: 60 }} placeholder="e.g. avoid double Maths on Fridays" />
       </label>
-      <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+      <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
         <input type="checkbox" checked={replaceGenerated} onChange={(e) => setReplaceGenerated(e.target.checked)} />
         Replace any previously generated entries (manual/imported entries are untouched)
+      </label>
+      <label style={{ fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+        <input type="checkbox" checked={fillEverySlot} onChange={(e) => setFillEverySlot(e.target.checked)} />
+        Fill every period for every class (may exceed the periods/week set above)
       </label>
       <button onClick={handleGenerate} disabled={generating} style={btn}>{generating ? 'Generating...' : 'Generate Timetable'}</button>
       {result && (
         <div style={{ marginTop: 12, fontSize: 12.5 }}>
           <div style={{ color: COLORS.good }}>{result.placed} entries placed.</div>
-          {result.unplaced.length > 0 && (
-            <div style={{ color: COLORS.warn, marginTop: 6 }}>
-              Couldn't fully place: <ul style={{ margin: '4px 0 0 18px' }}>{result.unplaced.map((u, i) => <li key={i}>{u}</li>)}</ul>
+
+          {fillEverySlot && Object.keys(result.classesFilled).length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              {CLASS_OPTIONS.map((c) => {
+                const stat = result.classesFilled[c.label]
+                if (!stat) return null
+                const full = stat.filled >= stat.total
+                return (
+                  <div key={c.value} style={{ color: full ? COLORS.good : COLORS.warn }}>
+                    {c.label}: {stat.filled}/{stat.total} periods filled{full ? '' : ' — some periods left empty'}
+                  </div>
+                )
+              })}
             </div>
           )}
+
+          {result.classesWithNoAssignments.length > 0 && (
+            <div style={{ color: COLORS.warn, marginTop: 6 }}>
+              No approved assignments at all for: {result.classesWithNoAssignments.join(', ')}. Nothing can be scheduled for {result.classesWithNoAssignments.length === 1 ? 'it' : 'them'} until a teacher self-assigns and the Dean approves.
+            </div>
+          )}
+
+          {result.unplacedRequested.length > 0 && (
+            <div style={{ color: COLORS.warn, marginTop: 6 }}>
+              Couldn't fully place the requested periods/week for: <ul style={{ margin: '4px 0 0 18px' }}>{result.unplacedRequested.map((u, i) => <li key={i}>{u}</li>)}</ul>
+            </div>
+          )}
+
           <button onClick={onDone} style={{ ...secondaryBtn, marginTop: 10 }}>Done</button>
         </div>
       )}
@@ -4919,7 +5322,9 @@ export default function App() {
       <NotificationProvider>
         <GradeScaleProvider>
           <CbcScaleProvider>
-            <AppContent />
+            <ConcurrentGroupsProvider>
+              <AppContent />
+            </ConcurrentGroupsProvider>
           </CbcScaleProvider>
         </GradeScaleProvider>
       </NotificationProvider>
