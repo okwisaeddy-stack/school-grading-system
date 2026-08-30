@@ -198,6 +198,10 @@ const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies':
 // Titles that count as "Leadership" — these admins can enter/edit marks for
 // any subject and class directly, without self-assigning a teacher row first.
 const LEADERSHIP_TITLES = Object.keys(TITLE_LIMITS)
+// Of those, School Manager and Director are purely administrative — they
+// don't teach a subject/class, so the Profiles screen shouldn't offer to
+// assign them one.
+const NON_TEACHING_TITLES = ['School Manager', 'Director']
 
 function Signup({ onSwitchToLogin, onSignedUp }) {
   const [fullName, setFullName] = useState('')
@@ -369,7 +373,7 @@ function useIsNarrow() {
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const isLeadership = LEADERSHIP_TITLES.includes(title)
   const tabs = [
-    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Teachers',
+    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Profiles',
     ...(isLeadership ? ['Enter Marks'] : []),
     'My Teaching', 'Approvals', 'Settings',
   ]
@@ -512,7 +516,7 @@ function DashboardScreen({ onNavigate }) {
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <StatCard label="Total students" value={counts.students} onClick={() => onNavigate('Students')} />
-          <StatCard label="Total teachers" value={counts.teachers} onClick={() => onNavigate('Teachers')} />
+          <StatCard label="Total teachers" value={counts.teachers} onClick={() => onNavigate('Profiles')} />
           <StatCard label="Total exams created" value={counts.exams} onClick={() => onNavigate('Exams')} />
           <StatCard label="Pending teacher approvals" value={counts.pending} tone={counts.pending > 0 ? 'warn' : 'good'} onClick={() => onNavigate('Approvals')} />
         </div>
@@ -3288,14 +3292,20 @@ async function computeReportFor(student, examId, cache = {}) {
 // ADMIN: Title-based promotion modal — pick Principal / Deputy Principal /
 // Dean of Studies, with slot limits enforced against currently approved admins
 // ============================================================================
-function PromoteToAdminModal({ teacher, teachers, onClose, onPromoted }) {
-  const { notify } = useNotify()
-  const [selectedTitle, setSelectedTitle] = useState('')
+function ChangeRoleModal({ teacher, teachers, onClose, onChanged }) {
+  const { notify, confirmAction } = useNotify()
+  const [selectedRole, setSelectedRole] = useState(teacher.role === 'admin' ? teacher.title : 'teacher')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  const wasAdmin = teacher.role === 'admin'
+
+  // Count title slots excluding this person's own current row, so re-saving
+  // them into the title they already hold (or moving a full slot to someone
+  // else) doesn't false-positive against the limit.
   const titleCounts = {}
   teachers.forEach((t) => {
+    if (t.id === teacher.id) return
     if (t.role === 'admin' && t.title) titleCounts[t.title] = (titleCounts[t.title] || 0) + 1
   })
   function isTitleFull(title) {
@@ -3303,15 +3313,29 @@ function PromoteToAdminModal({ teacher, teachers, onClose, onPromoted }) {
   }
 
   async function handleConfirm() {
-    if (!selectedTitle) { setError('Select a title first.'); return }
-    if (isTitleFull(selectedTitle)) { setError(`${selectedTitle} already has the maximum of ${TITLE_LIMITS[selectedTitle]}.`); return }
+    if (!selectedRole) { setError('Select a role first.'); return }
+    if (selectedRole !== 'teacher' && isTitleFull(selectedRole)) {
+      setError(`${selectedRole} already has the maximum of ${TITLE_LIMITS[selectedRole]}.`)
+      return
+    }
+    // Demoting someone out of admin is the sensitive direction — confirm it.
+    if (wasAdmin && selectedRole === 'teacher') {
+      const confirmed = await confirmAction(
+        `Remove ${teacher.full_name}'s admin access and make them a regular teacher? They'll lose access to Students, Reports, Approvals, and Settings.`,
+        { danger: true, confirmLabel: 'Demote' }
+      )
+      if (!confirmed) return
+    }
     setSaving(true)
     setError('')
-    const { error: updateError } = await supabase.from('profiles').update({ role: 'admin', title: selectedTitle }).eq('id', teacher.id)
+    const updates = selectedRole === 'teacher'
+      ? { role: 'teacher', title: null }
+      : { role: 'admin', title: selectedRole }
+    const { error: updateError } = await supabase.from('profiles').update(updates).eq('id', teacher.id)
     if (updateError) { setError(updateError.message); setSaving(false); return }
     setSaving(false)
-    notify(`${teacher.full_name} promoted to ${selectedTitle}.`)
-    onPromoted()
+    notify(selectedRole === 'teacher' ? `${teacher.full_name} is now a Teacher.` : `${teacher.full_name} is now ${selectedRole}.`)
+    onChanged()
     onClose()
   }
 
@@ -3319,15 +3343,18 @@ function PromoteToAdminModal({ teacher, teachers, onClose, onPromoted }) {
     <div style={modalOverlay}>
       <div style={{ ...modalCard, maxWidth: 'min(420px, 94vw)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3>Promote {teacher.full_name}</h3>
+          <h3>{wasAdmin ? `Change Role — ${teacher.full_name}` : `Promote ${teacher.full_name}`}</h3>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
         </div>
         <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 14 }}>
-          Choose the administrative title. This grants full admin access — students, marks, reports, approvals.
+          {wasAdmin
+            ? 'Choose a new title, or move them back to Teacher.'
+            : 'Choose the administrative title. This grants full admin access — students, marks, reports, approvals.'}
         </p>
-        <label style={fieldLabel}>Title
-          <select value={selectedTitle} onChange={(e) => { setSelectedTitle(e.target.value); setError('') }} style={input}>
+        <label style={fieldLabel}>Role
+          <select value={selectedRole || ''} onChange={(e) => { setSelectedRole(e.target.value); setError('') }} style={input}>
             <option value="">Select…</option>
+            {wasAdmin && <option value="teacher">Teacher (remove admin access)</option>}
             {Object.keys(TITLE_LIMITS).map((title) => (
               <option key={title} value={title} disabled={isTitleFull(title)}>
                 {title}{isTitleFull(title) ? ` (full — ${titleCounts[title] || 0}/${TITLE_LIMITS[title]})` : ` (${titleCounts[title] || 0}/${TITLE_LIMITS[title]})`}
@@ -3338,30 +3365,38 @@ function PromoteToAdminModal({ teacher, teachers, onClose, onPromoted }) {
         {error && <p style={errorText}>{error}</p>}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
           <button onClick={onClose} style={secondaryBtn}>Cancel</button>
-          <button onClick={handleConfirm} disabled={saving || !selectedTitle} style={btn}>{saving ? 'Promoting...' : 'Promote'}</button>
+          <button onClick={handleConfirm} disabled={saving || !selectedRole} style={btn}>{saving ? 'Saving...' : 'Save'}</button>
         </div>
       </div>
     </div>
   )
 }
 
-function TeachersScreen() {
+function TeachersScreen({ currentUserId }) {
   const { notify, confirmAction } = useNotify()
   const [teachers, setTeachers] = useState([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
-  const [promotingTeacher, setPromotingTeacher] = useState(null)
+  const [changingRoleFor, setChangingRoleFor] = useState(null)
   const [assigningTeacher, setAssigningTeacher] = useState(null)
 
   useEffect(() => { loadTeachers() }, [])
 
 async function loadTeachers() {
     setLoading(true)
-    const { data: teacherProfiles } = await supabase
+    const { data: allApproved } = await supabase
       .from('profiles')
       .select('*')
+      .in('role', ['teacher', 'admin'])
       .eq('status', 'approved')
       .order('full_name')
+
+    // Teachers always show; admins only show if they hold a real leadership
+    // title (Dean/Principal/Deputy/School Manager/Director). Untitled/system
+    // admin accounts (e.g. a personal monitoring login) stay hidden here.
+    const teacherProfiles = (allApproved || []).filter(
+      (p) => p.role === 'teacher' || (p.role === 'admin' && p.title)
+    )
 
     const teacherIds = (teacherProfiles || []).map((t) => t.id)
 
@@ -3421,7 +3456,7 @@ async function loadTeachers() {
 
   return (
     <div style={pageWrap}>
-      <h2>Staff</h2>
+      <h2>Profiles</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
         Every teacher (and any admin who also teaches) self-assigns their subjects/classes, or an admin can add one for them below. Remove an assignment here if it was set up wrong.
       </p>
@@ -3463,14 +3498,20 @@ async function loadTeachers() {
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: 12 }}>
-                  {t.role !== 'admin' && (
-                    <button onClick={() => setPromotingTeacher(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                      Promote to Admin
+                  {t.id !== currentUserId ? (
+                    <button onClick={() => setChangingRoleFor(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      {t.role === 'admin' ? 'Change Role' : 'Promote to Admin'}
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 12, color: COLORS.muted, fontStyle: 'italic' }} title="Ask another admin to change your own role">
+                      (this is you)
+                    </span>
+                  )}
+                  {!(t.role === 'admin' && NON_TEACHING_TITLES.includes(t.title)) && (
+                    <button onClick={() => setAssigningTeacher(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                      + Add Subject/Class
                     </button>
                   )}
-                  <button onClick={() => setAssigningTeacher(t)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                    + Add Subject/Class
-                  </button>
                   <button onClick={() => removeTeacher(t.id, t.full_name)} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                     Remove
                   </button>
@@ -3489,28 +3530,30 @@ async function loadTeachers() {
                   </select>
                 </label>
               </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {t.assignments.length === 0 && (
-                  <span style={{ fontSize: 12, color: COLORS.muted, fontStyle: 'italic' }}>No subjects assigned</span>
-                )}
-                {t.assignments.map((a) => (
-                  <span key={a.id} style={{ ...pillStatic, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {a.subjects?.name} · {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label || a.class_label}
-                    <span onClick={() => removeAssignment(a.id)} style={{ cursor: 'pointer', color: COLORS.warn, fontWeight: 700 }}>✕</span>
-                  </span>
-                ))}
-              </div>
+              {!(t.role === 'admin' && NON_TEACHING_TITLES.includes(t.title)) && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {t.assignments.length === 0 && (
+                    <span style={{ fontSize: 12, color: COLORS.muted, fontStyle: 'italic' }}>No subjects assigned</span>
+                  )}
+                  {t.assignments.map((a) => (
+                    <span key={a.id} style={{ ...pillStatic, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {a.subjects?.name} · {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label || a.class_label}
+                      <span onClick={() => removeAssignment(a.id)} style={{ cursor: 'pointer', color: COLORS.warn, fontWeight: 700 }}>✕</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      {promotingTeacher && (
-        <PromoteToAdminModal
-          teacher={promotingTeacher}
+      {changingRoleFor && (
+        <ChangeRoleModal
+          teacher={changingRoleFor}
           teachers={teachers}
-          onClose={() => setPromotingTeacher(null)}
-          onPromoted={loadTeachers}
+          onClose={() => setChangingRoleFor(null)}
+          onChanged={loadTeachers}
         />
       )}
       {assigningTeacher && (
@@ -4286,7 +4329,7 @@ function AppContent() {
             {tab === 'Reports' && <ReportsScreen />}
             {tab === 'Performance Track' && <PerformanceTrackScreen />}
             {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
-            {tab === 'Teachers' && <TeachersScreen />}
+            {tab === 'Profiles' && <TeachersScreen currentUserId={profile.id} />}
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
