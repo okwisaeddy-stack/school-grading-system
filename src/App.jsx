@@ -4165,6 +4165,7 @@ function AppContent() {
   const [stage, setStage] = useState('login')
   const [loadingProfile, setLoadingProfile] = useState(false)
   const [tab, setTab] = useState('Dashboard')
+  const isNarrow = useIsNarrow()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -4201,7 +4202,7 @@ function AppContent() {
     }
     if (profile.role === 'admin') {
       return (
-        <div style={{ background: COLORS.paper, minHeight: '100vh', display: 'flex' }}>
+        <div style={{ background: COLORS.paper, minHeight: '100vh', display: 'flex', flexDirection: isNarrow ? 'column' : 'row' }}>
           <TopBar tab={tab} setTab={setTab} onLogout={handleLogout} fullName={profile.full_name} title={profile.title} />
           <div style={{ flex: 1, minWidth: 0 }}>
             {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
