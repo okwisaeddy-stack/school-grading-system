@@ -17,7 +17,7 @@ import {
 } from './theme'
 import {
   DEFAULT_KNEC_SCALE, kcseGrade, pointsForGrade, cbcLevel, CBC_POINTS,
-  computeKcseAggregate, computeCbcTotal,
+  computeKcseAggregate, computeCbcTotal, DEFAULT_CBC_SCALE,
 } from './utils/grading'
 
 // ============================================================================
@@ -122,6 +122,37 @@ function NotificationProvider({ children }) {
         </div>
       )}
     </NotificationContext.Provider>
+  )
+}
+
+const CbcScaleContext = createContext(null)
+
+function useCbcScale() {
+  const ctx = useContext(CbcScaleContext)
+  return ctx || { scale: DEFAULT_CBC_SCALE, loading: false, reload: () => {} }
+}
+
+function CbcScaleProvider({ children }) {
+  const [scale, setScale] = useState(DEFAULT_CBC_SCALE)
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    const { data, error } = await supabase.from('cbc_scale').select('*').order('min_score', { ascending: false })
+    if (!error && data && data.length > 0) {
+      setScale(data.map((r) => ({ label: r.label, min_score: r.min_score, points: r.points })))
+    } else {
+      setScale(DEFAULT_CBC_SCALE)
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  return (
+    <CbcScaleContext.Provider value={{ scale, loading, reload }}>
+      {children}
+    </CbcScaleContext.Provider>
   )
 }
 
@@ -2842,6 +2873,7 @@ function buildSmsMessage(report) {
   function ReportsScreen() {
   const { notify } = useNotify()
   const { scale: gradeScale } = useGradeScale()
+  const { scale: cbcScale } = useCbcScale()
   const [mode, setMode] = useState('single') // single | batch
   const [batchCohortFilter, setBatchCohortFilter] = useState('form_4')
   const [exams, setExams] = useState([])
@@ -2886,13 +2918,13 @@ async function computeReportFor(student, examId, cache = {}) {
         is_compulsory: ss.is_compulsory,
         score: now ? now.score : null,
         prevScore: prev ? prev.score : null,
-        grade: now ? (isCbc ? cbcLevel(now.score) : kcseGrade(now.score, gradeScale)) : null,
-        prevGrade: prev ? (isCbc ? cbcLevel(prev.score) : kcseGrade(prev.score, gradeScale)) : null,
+        grade: now ? (isCbc ? cbcLevel(now.score, cbcScale) : kcseGrade(now.score, gradeScale)) : null,
+        prevGrade: prev ? (isCbc ? cbcLevel(prev.score, cbcScale) : kcseGrade(prev.score, gradeScale)) : null,
         remark: now ? now.remark : null,
       }
     })
     const aggregate = isCbc
-      ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })))
+      ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })), cbcScale)
       : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })), gradeScale)
     // Cache cohort rankings per exam so a batch run doesn't refetch the
     // same cohort-wide ranking data for every single student.
@@ -2908,7 +2940,7 @@ async function computeReportFor(student, examId, cache = {}) {
     let prevAggregate = null, prevPosition = null, prevOutOf = null
     if (prevExam) {
       prevAggregate = isCbc
-        ? computeCbcTotal(subjectRows.map((r) => ({ score: r.prevScore })))
+        ? computeCbcTotal(subjectRows.map((r) => ({ score: r.prevScore })), cbcScale)
         : computeKcseAggregate(subjectRows.map((r) => ({ score: r.prevScore, is_compulsory: r.is_compulsory })), gradeScale)
       const prevRankKey = `${student.cohort}:${prevExam.id}`
       if (!cache[prevRankKey]) {
@@ -4042,9 +4074,10 @@ function GateScreen({ children }) {
   return children
 }
 
-function SettingsScreen() {
+// Reusable editor for a min-score-ordered scale (label/min_score/points rows) backed by a
+// Supabase table. Used for both the KCSE grade_scale and the CBC cbc_scale.
+function ScaleEditor({ table, scale, loading, reload, labelPlaceholder, defaultLabel, saveConfirmMsg, resetConfirmMsg, resetButtonLabel, savedNotice, resetNotice }) {
   const { notify, confirmAction } = useNotify()
-  const { scale, loading, reload } = useGradeScale()
   const [rows, setRows] = useState([])
   const [saving, setSaving] = useState(false)
 
@@ -4070,44 +4103,38 @@ function SettingsScreen() {
       notify('Add at least one grade before saving.', 'error')
       return
     }
-    const confirmed = await confirmAction('Save this grading scale? It will immediately change how grades, points, and rankings are calculated across the app.', { confirmLabel: 'Save' })
+    const confirmed = await confirmAction(saveConfirmMsg, { confirmLabel: 'Save' })
     if (!confirmed) return
     setSaving(true)
-    const { error: deleteError } = await supabase.from('grade_scale').delete().gte('min_score', -1)
+    const { error: deleteError } = await supabase.from(table).delete().gte('min_score', -1)
     if (deleteError) { setSaving(false); notify(`Couldn't save: ${deleteError.message}`, 'error'); return }
-    const { error: insertError } = await supabase.from('grade_scale').insert(cleaned)
+    const { error: insertError } = await supabase.from(table).insert(cleaned)
     setSaving(false)
     if (insertError) { notify(`Couldn't save: ${insertError.message}`, 'error'); return }
-    notify('Grading scale updated.')
+    notify(savedNotice)
     reload()
   }
 
-  async function handleResetToKnec() {
-    const confirmed = await confirmAction('Reset to the standard KNEC grading scale? Any custom scale you saved will be replaced.', { danger: true, confirmLabel: 'Reset' })
+  async function handleReset() {
+    const confirmed = await confirmAction(resetConfirmMsg, { danger: true, confirmLabel: 'Reset' })
     if (!confirmed) return
     setSaving(true)
-    const { error: deleteError } = await supabase.from('grade_scale').delete().gte('min_score', -1)
+    const { error: deleteError } = await supabase.from(table).delete().gte('min_score', -1)
     setSaving(false)
     if (deleteError) { notify(`Couldn't reset: ${deleteError.message}`, 'error'); return }
-    notify('Reset to KNEC grading scale.')
+    notify(resetNotice)
     reload()
   }
 
-  if (loading) return <div style={pageWrap}><p>Loading...</p></div>
+  if (loading) return <p>Loading...</p>
 
   return (
-    <div style={pageWrap}>
-      <h2 style={{ marginBottom: 4 }}>Settings</h2>
-      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
-        Customize the grading scale used for Form 1–4 letter grades and points (KCSE-style subjects). This does not affect the CBC (Grade 10) level scale.
-      </p>
-
-      <div style={sectionLabel}>Grading scale</div>
+    <>
       <div style={{ border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'hidden', marginBottom: 14 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
-              <th style={th}>Grade</th>
+              <th style={th}>{defaultLabel}</th>
               <th style={th}>Min score</th>
               <th style={th}>Points</th>
               <th style={th}></th>
@@ -4117,7 +4144,7 @@ function SettingsScreen() {
             {rows.map((r, idx) => (
               <tr key={idx} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                 <td style={td}>
-                  <input value={r.label} onChange={(e) => updateRow(idx, 'label', e.target.value)} style={{ ...input, marginBottom: 0, width: 70 }} placeholder="e.g. A" />
+                  <input value={r.label} onChange={(e) => updateRow(idx, 'label', e.target.value)} style={{ ...input, marginBottom: 0, width: 70 }} placeholder={labelPlaceholder} />
                 </td>
                 <td style={td}>
                   <input type="number" value={r.min_score} onChange={(e) => updateRow(idx, 'min_score', e.target.value)} style={{ ...input, marginBottom: 0, width: 90 }} />
@@ -4135,13 +4162,59 @@ function SettingsScreen() {
       </div>
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <button onClick={addRow} style={secondaryBtn}>+ Add grade</button>
+        <button onClick={addRow} style={secondaryBtn}>+ Add row</button>
         <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save scale'}</button>
-        <button onClick={handleResetToKnec} disabled={saving} style={secondaryBtn}>Reset to KNEC default</button>
+        <button onClick={handleReset} disabled={saving} style={secondaryBtn}>{resetButtonLabel}</button>
       </div>
+    </>
+  )
+}
 
-      <p style={{ color: COLORS.muted, fontSize: 12, marginTop: 16 }}>
+function SettingsScreen() {
+  const { scale: kcseScale, loading: kcseLoading, reload: reloadKcse } = useGradeScale()
+  const { scale: cbcScale, loading: cbcLoading, reload: reloadCbc } = useCbcScale()
+
+  return (
+    <div style={pageWrap}>
+      <h2 style={{ marginBottom: 4 }}>Settings</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
+        Customize the grading scales used across the school. Each cohort's scale is independent, so changing one does not affect the other.
+      </p>
+
+      <div style={sectionLabel}>KCSE grading scale (Form 1–4)</div>
+      <ScaleEditor
+        table="grade_scale"
+        scale={kcseScale}
+        loading={kcseLoading}
+        reload={reloadKcse}
+        labelPlaceholder="e.g. A"
+        defaultLabel="Grade"
+        saveConfirmMsg="Save this KCSE grading scale? It will immediately change how grades, points, and rankings are calculated for Form 1–4 subjects."
+        resetConfirmMsg="Reset to the standard KNEC grading scale? Any custom scale you saved will be replaced."
+        resetButtonLabel="Reset to KNEC default"
+        savedNotice="KCSE grading scale updated."
+        resetNotice="Reset to KNEC grading scale."
+      />
+      <p style={{ color: COLORS.muted, fontSize: 12, marginTop: 4, marginBottom: 28 }}>
         A student's grade is the highest row whose minimum score they meet or beat, so keep minimum scores in descending order from top to bottom.
+      </p>
+
+      <div style={sectionLabel}>CBC competency-level scale (Grade 10)</div>
+      <ScaleEditor
+        table="cbc_scale"
+        scale={cbcScale}
+        loading={cbcLoading}
+        reload={reloadCbc}
+        labelPlaceholder="e.g. EE1"
+        defaultLabel="Level"
+        saveConfirmMsg="Save this CBC competency scale? It will immediately change how levels, points, and rankings are calculated for Grade 10 subjects."
+        resetConfirmMsg="Reset to the standard CBC competency scale? Any custom scale you saved will be replaced."
+        resetButtonLabel="Reset to CBC default"
+        savedNotice="CBC competency scale updated."
+        resetNotice="Reset to CBC competency scale."
+      />
+      <p style={{ color: COLORS.muted, fontSize: 12, marginTop: 4 }}>
+        A student's level is the highest row whose minimum score they meet or beat, so keep minimum scores in descending order from top to bottom.
       </p>
     </div>
   )
@@ -4152,7 +4225,9 @@ export default function App() {
     <GateScreen>
       <NotificationProvider>
         <GradeScaleProvider>
-          <AppContent />
+          <CbcScaleProvider>
+            <AppContent />
+          </CbcScaleProvider>
         </GradeScaleProvider>
       </NotificationProvider>
     </GateScreen>

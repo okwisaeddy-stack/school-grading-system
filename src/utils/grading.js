@@ -31,18 +31,28 @@ export function pointsForGrade(label, scale = DEFAULT_KNEC_SCALE) {
   return scale.find((r) => r.label === label)?.points ?? 0
 }
 
-export function cbcLevel(score) {
-  if (score >= 90) return 'EE1'
-  if (score >= 75) return 'EE2'
-  if (score >= 58) return 'ME1'
-  if (score >= 41) return 'ME2'
-  if (score >= 31) return 'AE1'
-  if (score >= 21) return 'AE2'
-  if (score >= 11) return 'BE1'
-  return 'BE2'
+// Default CBC scale — used until/unless an admin/dean saves a custom one in Supabase (cbc_scale table)
+export const DEFAULT_CBC_SCALE = [
+  { label: 'EE1', min_score: 90, points: 8 },
+  { label: 'EE2', min_score: 75, points: 7 },
+  { label: 'ME1', min_score: 58, points: 6 },
+  { label: 'ME2', min_score: 41, points: 5 },
+  { label: 'AE1', min_score: 31, points: 4 },
+  { label: 'AE2', min_score: 21, points: 3 },
+  { label: 'BE1', min_score: 11, points: 2 },
+  { label: 'BE2', min_score: 0, points: 1 },
+]
+
+// scale must be sorted descending by min_score (CbcScaleProvider guarantees this)
+export function cbcLevel(score, scale = DEFAULT_CBC_SCALE) {
+  for (const row of scale) {
+    if (score >= row.min_score) return row.label
+  }
+  return scale[scale.length - 1]?.label ?? 'BE2'
 }
 
-export const CBC_POINTS = { EE1: 8, EE2: 7, ME1: 6, ME2: 5, AE1: 4, AE2: 3, BE1: 2, BE2: 1 }
+// Kept for any code still importing the old fixed lookup — derived from the default scale
+export const CBC_POINTS = Object.fromEntries(DEFAULT_CBC_SCALE.map((r) => [r.label, r.points]))
 
 // Best-7 aggregate for KCSE: compulsory always count, best electives fill the rest
 export function computeKcseAggregate(subjectScores, scale = DEFAULT_KNEC_SCALE) {
@@ -59,9 +69,10 @@ export function computeKcseAggregate(subjectScores, scale = DEFAULT_KNEC_SCALE) 
   return { total, maxTotal, subjectCount: counted.length }
 }
 
-export function computeCbcTotal(subjectScores) {
+export function computeCbcTotal(subjectScores, scale = DEFAULT_CBC_SCALE) {
+  const maxPoints = Math.max(...scale.map((r) => r.points))
   const withScores = subjectScores.filter((s) => s.score !== null && s.score !== undefined)
-  const total = withScores.reduce((sum, s) => sum + CBC_POINTS[cbcLevel(s.score)], 0)
-  const maxTotal = withScores.length * 8
+  const total = withScores.reduce((sum, s) => sum + pointsForGrade(cbcLevel(s.score, scale), scale), 0)
+  const maxTotal = withScores.length * maxPoints
   return { total, maxTotal, subjectCount: withScores.length }
 }
