@@ -1815,13 +1815,13 @@ function ExamsScreen() {
           ) : (
             <div style={{ display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, flexWrap: 'wrap' }}>
               <label style={fieldLabel}>Principal's name
-                <input value={principalName} onChange={(e) => setPrincipalName(e.target.value)} style={input} placeholder="e.g. Samuel Mburu" />
+                <input value={principalName} onChange={(e) => setPrincipalName(e.target.value)} style={input} placeholder="School Principal" />
               </label>
               <label style={fieldLabel}>Principal's signature (image)
                 <input type="file" accept="image/*" onChange={(e) => setPrincipalSigFile(e.target.files[0])} style={input} />
               </label>
               <label style={fieldLabel}>School Manager's name
-                <input value={managerName} onChange={(e) => setManagerName(e.target.value)} style={input} placeholder="e.g. Andrias Hammer" />
+                <input value={managerName} onChange={(e) => setManagerName(e.target.value)} style={input} placeholder="School Manager" />
               </label>
               <label style={fieldLabel}>School Manager's signature (image)
                 <input type="file" accept="image/*" onChange={(e) => setManagerSigFile(e.target.files[0])} style={input} />
