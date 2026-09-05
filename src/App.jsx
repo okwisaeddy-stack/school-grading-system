@@ -2210,7 +2210,9 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
       (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
     )
     const anyEnrollmentRecord = new Set((allEnrollmentRows || []).map((r) => r.student_id))
-    const studentData = (classStudents || []).filter((s) => enrolledForSubject.has(s.id))
+    const studentData = (classStudents || []).filter(
+      (s) => enrolledForSubject.has(s.id) || !anyEnrollmentRecord.has(s.id)
+    )
     setStudents(studentData || [])
     const { data: marksData } = await supabase
       .from('marks').select('*')
