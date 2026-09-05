@@ -2498,8 +2498,19 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
     setLoading(true)
     const assignment = currentAssignment()
     if (!assignment) { setLoading(false); return }
-    const { data: classStudents } = await supabase
-      .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
+    // Uses an RPC (get_class_students, SECURITY DEFINER) instead of a direct
+    // `students` select. The RLS policy on `students` was silently returning
+    // zero rows for every non-admin teacher (root cause never fully isolated
+    // in Postgres policy internals), so the authorization check — admin, or
+    // an approved teacher with a matching teacher_assignments row — is done
+    // once inside the function itself, sidestepping the broken policy.
+    const { data: classStudents, error: classStudentsError } = await supabase
+      .rpc('get_class_students', { p_class_label: assignment.class_label, p_subject_id: assignment.subject_id })
+    if (classStudentsError) {
+      notify(`Couldn't load students: ${classStudentsError.message}`, 'error')
+      setLoading(false)
+      return
+    }
     const classStudentIds = (classStudents || []).map((s) => s.id)
     const { data: allEnrollmentRows } = await supabase
       .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
@@ -3048,14 +3059,158 @@ async function downloadReceipt({ payment, student, invoices, payments, meta }) {
   URL.revokeObjectURL(url)
 }
 
-function FeesScreen({ profile }) {
+// ============================================================================
+// FINANCE: batch receipt download — one zip of every payment's receipt for
+// every student in a class. Reuses the same buildReceiptHtml/receiptToPdfBlob
+// used for one-off receipts, so a batch receipt looks identical to a single one.
+// ============================================================================
+async function downloadClassReceiptsAsZip(classLabel, meta, onProgress) {
+  const { data: classStudents, error: studentsError } = await supabase
+    .rpc('get_class_students', { p_class_label: classLabel, p_subject_id: null })
+  if (studentsError) throw new Error(studentsError.message)
+  const students = classStudents || []
+  if (students.length === 0) throw new Error('No students found in this class.')
+
+  const studentIds = students.map((s) => s.id)
+  const [{ data: allInvoices, error: invError }, { data: allPayments, error: payError }] = await Promise.all([
+    supabase.from('fee_invoices').select('*').in('student_id', studentIds),
+    supabase.from('fee_payments').select('*').in('student_id', studentIds).order('paid_at', { ascending: false }),
+  ])
+  if (invError) throw new Error(invError.message)
+  if (payError) throw new Error(payError.message)
+
+  const zip = new JSZip()
+  let done = 0
+  const payments = allPayments || []
+  for (const student of students) {
+    const studentInvoices = (allInvoices || []).filter((i) => i.student_id === student.id)
+    const studentPayments = payments.filter((p) => p.student_id === student.id)
+    for (const payment of studentPayments) {
+      const html = buildReceiptHtml({ payment, student, invoices: studentInvoices, payments: studentPayments, meta })
+      const blob = await receiptToPdfBlob(html)
+      const fileName = `${student.admission_no}_${student.full_name.replace(/\s+/g, '_')}_${new Date(payment.paid_at).toISOString().slice(0, 10)}_${payment.id.slice(0, 6)}.pdf`
+      zip.file(fileName, blob)
+    }
+    done++
+    onProgress?.(done, students.length)
+  }
+  const zipBlob = await zip.generateAsync({ type: 'blob' })
+  const url = URL.createObjectURL(zipBlob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `receipts_${classLabel}_${new Date().toISOString().slice(0, 10)}.zip`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ============================================================================
+// FINANCE: modal to set/update School Fees for every student in a class at
+// once, for a chosen term/year. Same upsert-by-term logic as the single-
+// student "Set Amount" action, just looped across the whole class.
+// ============================================================================
+function SetClassFeesModal({ profile, onClose, onDone }) {
   const { notify } = useNotify()
+  const [classLabel, setClassLabel] = useState(CLASS_OPTIONS[0]?.value || '')
+  const [term, setTerm] = useState('Term 1')
+  const [year, setYear] = useState(new Date().getFullYear())
+  const [amount, setAmount] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [progress, setProgress] = useState(null) // { done, total }
+
+  async function handleSave() {
+    if (!amount) { notify('Enter the amount due.', 'error'); return }
+    setSaving(true)
+    setProgress(null)
+    try {
+      const { data: classStudents, error: studentsError } = await supabase
+        .rpc('get_class_students', { p_class_label: classLabel, p_subject_id: null })
+      if (studentsError) throw new Error(studentsError.message)
+      const students = classStudents || []
+      if (students.length === 0) throw new Error('No students found in this class.')
+
+      const studentIds = students.map((s) => s.id)
+      const { data: existingInvoices, error: invError } = await supabase
+        .from('fee_invoices').select('*')
+        .in('student_id', studentIds).eq('term', term).eq('year', Number(year)).eq('item_name', 'School Fees')
+      if (invError) throw new Error(invError.message)
+      const existingByStudent = {}
+      ;(existingInvoices || []).forEach((i) => { existingByStudent[i.student_id] = i })
+
+      let done = 0
+      for (const student of students) {
+        const existing = existingByStudent[student.id]
+        const { error } = existing
+          ? await supabase.from('fee_invoices').update({ amount: Number(amount) }).eq('id', existing.id)
+          : await supabase.from('fee_invoices').insert({
+              student_id: student.id, term, year: Number(year), item_name: 'School Fees',
+              amount: Number(amount), created_by: profile.id,
+            })
+        if (error) throw new Error(`${student.full_name}: ${error.message}`)
+        done++
+        setProgress({ done, total: students.length })
+      }
+      notify(`Set ${term} ${year} fees to ${Number(amount).toLocaleString()} for ${students.length} student${students.length === 1 ? '' : 's'}.`)
+      onDone()
+    } catch (err) {
+      notify(`Couldn't set fees for the class: ${err.message}`, 'error')
+    }
+    setSaving(false)
+  }
+
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 420 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3>Set School Fees — Whole Class</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <p style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 14 }}>
+          Sets (or updates) the amount due for every student in this class for the chosen term. Students who already have an amount set for that term get it updated, not duplicated.
+        </p>
+        <label style={fieldLabel}>Class
+          <select value={classLabel} onChange={(e) => setClassLabel(e.target.value)} style={input}>
+            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <label style={{ ...fieldLabel, flex: 1 }}>Term
+            <select value={term} onChange={(e) => setTerm(e.target.value)} style={input}>
+              <option>Term 1</option><option>Term 2</option><option>Term 3</option>
+            </select>
+          </label>
+          <label style={{ ...fieldLabel, width: 100 }}>Year
+            <input type="number" value={year} onChange={(e) => setYear(e.target.value)} style={input} />
+          </label>
+        </div>
+        <label style={fieldLabel}>Amount Due (applies to everyone in the class)
+          <input type="number" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} style={input} />
+        </label>
+        {progress && (
+          <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 8 }}>
+            Saving {progress.done} / {progress.total}...
+          </p>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          <button onClick={onClose} style={secondaryBtn} disabled={saving}>Cancel</button>
+          <button onClick={handleSave} disabled={!classLabel || !amount || saving} style={btn}>
+            {saving ? 'Saving...' : 'Set for Whole Class'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FeesScreen({ profile }) {
+  const { notify, confirmAction } = useNotify()
   const { logoUrl, receiptTemplateUrl } = useSchoolSettings()
   const [student, setStudent] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [payments, setPayments] = useState([])
   const [loading, setLoading] = useState(false)
   const [receiptLoadingId, setReceiptLoadingId] = useState(null)
+  const [deletingInvoiceId, setDeletingInvoiceId] = useState(null)
+  const [deletingPaymentId, setDeletingPaymentId] = useState(null)
 
   const [invTerm, setInvTerm] = useState('Term 1')
   const [invYear, setInvYear] = useState(new Date().getFullYear())
@@ -3067,6 +3222,11 @@ function FeesScreen({ profile }) {
   const [payRef, setPayRef] = useState('')
   const [payNote, setPayNote] = useState('')
   const [savingPayment, setSavingPayment] = useState(false)
+
+  const [showSetClassFees, setShowSetClassFees] = useState(false)
+  const [batchClassLabel, setBatchClassLabel] = useState(CLASS_OPTIONS[0]?.value || '')
+  const [batchDownloading, setBatchDownloading] = useState(false)
+  const [batchProgress, setBatchProgress] = useState(null) // { done, total }
 
   useEffect(() => { if (student) loadLedger() }, [student])
 
@@ -3127,6 +3287,52 @@ function FeesScreen({ profile }) {
     setReceiptLoadingId(null)
   }
 
+  // Deletes are permanent (no soft-delete/status flag), consistent with how
+  // deletes work everywhere else in the app.
+  async function handleDeleteInvoice(invoice) {
+    const ok = await confirmAction(
+      `Permanently delete the ${invoice.term} ${invoice.year} fee amount (${Number(invoice.amount).toLocaleString()}) for ${student.full_name}? This cannot be undone.`,
+      { danger: true, confirmLabel: 'Delete' }
+    )
+    if (!ok) return
+    setDeletingInvoiceId(invoice.id)
+    const { error } = await supabase.from('fee_invoices').delete().eq('id', invoice.id)
+    setDeletingInvoiceId(null)
+    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
+    notify('Fee amount entry deleted.')
+    loadLedger()
+  }
+
+  async function handleDeletePayment(payment) {
+    const ok = await confirmAction(
+      `Permanently delete this payment of ${Number(payment.amount).toLocaleString()} (${payment.method}) for ${student.full_name}? This cannot be undone.`,
+      { danger: true, confirmLabel: 'Delete' }
+    )
+    if (!ok) return
+    setDeletingPaymentId(payment.id)
+    const { error } = await supabase.from('fee_payments').delete().eq('id', payment.id)
+    setDeletingPaymentId(null)
+    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
+    notify('Payment entry deleted.')
+    loadLedger()
+  }
+
+  async function handleBatchDownloadReceipts() {
+    setBatchDownloading(true)
+    setBatchProgress(null)
+    try {
+      await downloadClassReceiptsAsZip(
+        batchClassLabel,
+        { logoUrl, receiptTemplateUrl },
+        (done, total) => setBatchProgress({ done, total })
+      )
+    } catch (err) {
+      notify(`Couldn't generate batch receipts: ${err.message}`, 'error')
+    }
+    setBatchDownloading(false)
+    setBatchProgress(null)
+  }
+
   const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
   const balance = totalInvoiced - totalPaid
@@ -3134,8 +3340,28 @@ function FeesScreen({ profile }) {
   return (
     <div style={pageWrap}>
       <h2>School Fees</h2>
+
+      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14, marginBottom: 20 }}>
+        <h3 style={{ fontSize: 14, marginBottom: 4 }}>Whole-Class Actions</h3>
+        <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>Set fees or pull receipts for every student in a class at once.</p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button onClick={() => setShowSetClassFees(true)} style={btn}>Set School Fees — Whole Class</button>
+          <select value={batchClassLabel} onChange={(e) => setBatchClassLabel(e.target.value)} style={{ ...input, width: 140, marginBottom: 0 }}>
+            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+          <button onClick={handleBatchDownloadReceipts} disabled={batchDownloading} style={secondaryBtn}>
+            {batchDownloading
+              ? (batchProgress ? `Generating ${batchProgress.done}/${batchProgress.total}...` : 'Generating...')
+              : 'Download All Receipts (Class)'}
+          </button>
+        </div>
+      </div>
+
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>Search for a student to view or update their fee ledger.</p>
       <FinanceStudentPicker selectedStudent={student} onSelect={setStudent} />
+      {showSetClassFees && (
+        <SetClassFeesModal profile={profile} onClose={() => setShowSetClassFees(false)} onDone={() => setShowSetClassFees(false)} />
+      )}
 
       {student && (
         loading ? <p style={{ color: COLORS.muted }}>Loading ledger...</p> : (
@@ -3171,15 +3397,24 @@ function FeesScreen({ profile }) {
                 </div>
                 <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th></tr></thead>
+                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th><th style={th}></th></tr></thead>
                     <tbody>
                       {invoices.map((i) => (
                         <tr key={i.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                           <td style={td}>{i.term} {i.year}</td>
                           <td style={{ ...td, textAlign: 'right' }}>{Number(i.amount).toLocaleString()}</td>
+                          <td style={td}>
+                            <button
+                              onClick={() => handleDeleteInvoice(i)}
+                              disabled={deletingInvoiceId === i.id}
+                              style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn }}
+                            >
+                              {deletingInvoiceId === i.id ? '...' : 'Delete'}
+                            </button>
+                          </td>
                         </tr>
                       ))}
-                      {invoices.length === 0 && <tr><td colSpan={2} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
+                      {invoices.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -3207,13 +3442,22 @@ function FeesScreen({ profile }) {
                           <td style={{ ...td, textAlign: 'right' }}>{Number(p.amount).toLocaleString()}</td>
                           <td style={{ ...td, color: COLORS.muted }}>{p.note || '—'}</td>
                           <td style={td}>
-                            <button
-                              onClick={() => handleDownloadReceipt(p)}
-                              disabled={receiptLoadingId === p.id}
-                              style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
-                            >
-                              {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
-                            </button>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                onClick={() => handleDownloadReceipt(p)}
+                                disabled={receiptLoadingId === p.id}
+                                style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
+                              >
+                                {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
+                              </button>
+                              <button
+                                onClick={() => handleDeletePayment(p)}
+                                disabled={deletingPaymentId === p.id}
+                                style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn }}
+                              >
+                                {deletingPaymentId === p.id ? '...' : 'Delete'}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
