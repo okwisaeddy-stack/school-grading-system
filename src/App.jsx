@@ -198,6 +198,54 @@ function CbcScaleProvider({ children }) {
 }
 
 // ============================================================================
+// SCHOOL SETTINGS — logo(s) + custom receipt design, editable by admins in
+// Settings, used everywhere the crest currently shows and by receipt/report
+// PDFs. Falls back to the bundled /crest.png and the built-in layouts when
+// nothing has been uploaded yet.
+//
+// reportBrandingCache is a plain module-level mirror of the two logo URLs.
+// buildReportHtml() below is a plain function (not a component, and it's
+// called from several places, some of them outside any component), so it
+// can't use the useSchoolSettings() hook directly — it reads this cache
+// instead. The provider keeps the cache in sync every time it (re)loads.
+// ============================================================================
+const SchoolSettingsContext = createContext(null)
+const reportBrandingCache = { logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png' }
+
+function useSchoolSettings() {
+  const ctx = useContext(SchoolSettingsContext)
+  return ctx || { logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png', receiptTemplateUrl: null, loading: false, reload: () => {} }
+}
+
+function SchoolSettingsProvider({ children }) {
+  const [logoUrl, setLogoUrl] = useState('/crest.png')
+  const [secondaryLogoUrl, setSecondaryLogoUrl] = useState('/crest.png')
+  const [receiptTemplateUrl, setReceiptTemplateUrl] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    const { data } = await supabase.from('school_settings').select('*').eq('id', 1).single()
+    const resolvedLogo = data?.logo_url || '/crest.png'
+    const resolvedSecondary = data?.secondary_logo_url || '/crest.png'
+    setLogoUrl(resolvedLogo)
+    setSecondaryLogoUrl(resolvedSecondary)
+    setReceiptTemplateUrl(data?.receipt_template_url || null)
+    reportBrandingCache.logoUrl = resolvedLogo
+    reportBrandingCache.secondaryLogoUrl = resolvedSecondary
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  return (
+    <SchoolSettingsContext.Provider value={{ logoUrl, secondaryLogoUrl, receiptTemplateUrl, loading, reload }}>
+      {children}
+    </SchoolSettingsContext.Provider>
+  )
+}
+
+// ============================================================================
 // AUTH SCREENS
 // ============================================================================
 function Login({ onSwitchToSignup }) {
@@ -216,11 +264,13 @@ function Login({ onSwitchToSignup }) {
     setLoading(false)
   }
 
+  const { logoUrl } = useSchoolSettings()
+
   return (
     <div style={wrap}>
       <form onSubmit={handleLogin} style={card}>
         <div style={{ textAlign: 'center', marginBottom: 14 }}>
-          <img src="/crest.png" alt="Crest" style={{ width: 56, height: 56, borderRadius: '50%' }} />
+          <img src={logoUrl} alt="Crest" style={{ width: 56, height: 56, borderRadius: '50%' }} />
         </div>
         <h3 style={{ textAlign: 'center' }}>Log In</h3>
         <input placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} style={input} />
@@ -277,19 +327,26 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
     }
     setLoading(true)
     const email = usernameToEmail(username)
-    const { data, error } = await supabase.auth.signUp({ email, password })
-    if (error) { setError(error.message); setLoading(false); return }
-
-    const isLeadership = roleChoice !== 'teacher'
-    const { error: profileError } = await supabase.from('profiles').insert({
-      id: data.user.id,
-      username: username.trim().toLowerCase(),
-      full_name: fullName.trim(),
-      role: isLeadership ? 'admin' : 'teacher',
-      title: isLeadership ? roleChoice : null,
-      status: 'pending',
+    const isLeadership = Object.keys(TITLE_LIMITS).includes(roleChoice)
+    const isFinance = roleChoice === 'finance'
+    // Pass the profile fields as signup metadata instead of a separate
+    // insert/update call afterward. The handle_new_user trigger reads this
+    // metadata and creates the complete profiles row in the same atomic
+    // step as the auth.users insert — no follow-up client call, so there's
+    // no RLS policy on `profiles` UPDATE that could silently block it.
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          username: username.trim().toLowerCase(),
+          full_name: fullName.trim(),
+          role: isLeadership ? 'admin' : (isFinance ? 'finance' : 'teacher'),
+          title: isLeadership ? roleChoice : (isFinance ? 'Bursar' : null),
+        },
+      },
     })
-    if (profileError) { setError(profileError.message); setLoading(false); return }
+    if (error) { setError(error.message); setLoading(false); return }
     setLoading(false)
     onSignedUp()
   }
@@ -307,6 +364,7 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
         <label style={fieldLabel}>Your role
           <select value={roleChoice} onChange={(e) => setRoleChoice(e.target.value)} style={input}>
             <option value="teacher">Subject Teacher</option>
+            <option value="finance">Bursar / Accounts (Fees & Pocket Money)</option>
             {Object.keys(TITLE_LIMITS).map((title) => (
               <option key={title} value={title} disabled={isTitleFull(title)}>
                 {title}{isTitleFull(title) ? ' (taken)' : ''}
@@ -314,9 +372,14 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
             ))}
           </select>
         </label>
-        {roleChoice !== 'teacher' && !isTitleFull(roleChoice) && (
+        {roleChoice !== 'teacher' && roleChoice !== 'finance' && !isTitleFull(roleChoice) && (
           <p style={{ fontSize: 11.5, color: COLORS.accent, marginTop: -4, marginBottom: 10 }}>
             Leadership roles get full admin access once approved — an existing admin will confirm this is genuinely you before it's granted.
+          </p>
+        )}
+        {roleChoice === 'finance' && (
+          <p style={{ fontSize: 11.5, color: COLORS.accent, marginTop: -4, marginBottom: 10 }}>
+            Bursar accounts can only see school fees, pocket money, and a basic student list — no marks, timetable, or other admin access.
           </p>
         )}
         {error && <p style={errorText}>{error}</p>}
@@ -415,12 +478,13 @@ function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const isLeadership = LEADERSHIP_TITLES.includes(title)
   const tabs = [
     'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
-    ...(isLeadership ? ['Enter Marks'] : []),
+    ...(isLeadership ? ['Enter Marks', 'Enrollment'] : []),
     'My Teaching', 'Approvals', 'Settings',
   ]
   const isNarrow = useIsNarrow()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showChangePw, setShowChangePw] = useState(false)
+  const { logoUrl } = useSchoolSettings()
 
   if (isNarrow) {
     // ---- Mobile: unchanged top bar + hamburger drawer ----
@@ -435,7 +499,7 @@ function TopBar({ tab, setTab, onLogout, fullName, title }) {
             >
               ☰
             </button>
-            <img src="/crest.png" alt="Crest" style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0 }} />
+            <img src={logoUrl} alt="Crest" style={{ width: 26, height: 26, borderRadius: '50%', flexShrink: 0 }} />
             <div style={{ fontWeight: 700, fontSize: 14 }}>PWA Records</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -475,7 +539,7 @@ function TopBar({ tab, setTab, onLogout, fullName, title }) {
       height: '100vh', position: 'sticky', top: 0,
     }}>
       <div style={{ padding: '22px 20px 18px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid rgba(255,255,255,0.12)` }}>
-        <img src="/crest.png" alt="Crest" style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0 }} />
+        <img src={logoUrl} alt="Crest" style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0 }} />
         <div style={{ fontWeight: 700, fontSize: 15, lineHeight: 1.25 }}>Paul Wanjigi Alpine<br/>Records</div>
       </div>
 
@@ -667,6 +731,8 @@ function ApprovalsScreen({ currentUserId }) {
                   <td style={td}>
                     {p.role === 'admin' ? (
                       <span style={{ color: COLORS.accent, fontWeight: 700 }}>{p.title || 'Admin'}</span>
+                    ) : p.role === 'finance' ? (
+                      <span style={{ color: COLORS.accent, fontWeight: 700 }}>Bursar / Accounts</span>
                     ) : (
                       'Subject Teacher'
                     )}
@@ -1343,6 +1409,214 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
           <button onClick={handleSave} disabled={saving || !canSave} style={btn}>{saving ? 'Saving...' : 'Save Changes'}</button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// ADMIN: Bulk Class Enrollment — set every student's subjects for a whole
+// class on one screen, instead of one at a time via Edit Student, and
+// instead of hand-written SQL.
+// ============================================================================
+function BulkEnrollmentScreen() {
+  const { notify } = useNotify()
+  const [cohort, setCohort] = useState('form_3')
+  const [allSubjects, setAllSubjects] = useState([])
+  const [students, setStudents] = useState([])
+  const [rows, setRows] = useState({}) // { studentId: { oneOfChoice, electives: [], grade10Electives: [] } }
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savedMsg, setSavedMsg] = useState('')
+
+  const isForm34 = cohort === 'form_3' || cohort === 'form_4'
+
+  const cohortOptions = [
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
+
+  const FORM34_ELECTIVE_MENU = ['Physics', 'Biology', 'Geography', 'History', 'CRE', 'French', 'German']
+  const namesInUse = isForm34
+    ? [...COMPULSORY_84, ...ONE_OF_GROUP, ...FORM34_ELECTIVE_MENU]
+    : [...GRADE10_COMPULSORY, ...GRADE10_ELECTIVE_MENU]
+  const knownNames = new Set((allSubjects || []).map((s) => s.name))
+  const missingNames = namesInUse.filter((n) => !knownNames.has(n))
+
+  useEffect(() => { loadClass() }, [cohort])
+
+  function blankRow() { return { oneOfChoice: '', electives: [], grade10Electives: [] } }
+
+  async function loadClass() {
+    setLoading(true)
+    setSavedMsg('')
+    const [{ data: subjectData }, { data: studentData }] = await Promise.all([
+      supabase.from('subjects').select('*'),
+      supabase.from('students').select('*').eq('cohort', cohort).order('full_name'),
+    ])
+    setAllSubjects(subjectData || [])
+    setStudents(studentData || [])
+    const studentIds = (studentData || []).map((s) => s.id)
+    const initRows = {}
+    ;(studentData || []).forEach((s) => { initRows[s.id] = blankRow() })
+    if (studentIds.length > 0) {
+      const { data: enrollRows } = await supabase
+        .from('student_subjects').select('student_id, is_compulsory, subjects(name)').in('student_id', studentIds)
+      ;(enrollRows || []).forEach((r) => {
+        const name = r.subjects?.name
+        const row = initRows[r.student_id]
+        if (!name || r.is_compulsory || !row) return
+        if (isForm34) {
+          if (ONE_OF_GROUP.includes(name)) row.oneOfChoice = name
+          else row.electives.push(name)
+        } else if (GRADE10_ELECTIVE_MENU.includes(name)) {
+          row.grade10Electives.push(name)
+        }
+      })
+    }
+    setRows(initRows)
+    setLoading(false)
+  }
+
+  function toggleElective(studentId, subject) {
+    setRows((prev) => {
+      const row = prev[studentId] || blankRow()
+      const has = row.electives.includes(subject)
+      if (!has && isExcludedTogether(row.electives, subject)) {
+        const pair = EXCLUSION_PAIRS.find(([a, b]) => a === subject || b === subject)
+        const conflict = pair.find((s) => s !== subject)
+        notify(`Can't add ${subject} — already taking ${conflict} for this student.`, 'error')
+        return prev
+      }
+      const nextElectives = has ? row.electives.filter((s) => s !== subject) : [...row.electives, subject]
+      return { ...prev, [studentId]: { ...row, electives: nextElectives } }
+    })
+  }
+
+  function toggleGrade10Elective(studentId, subject) {
+    setRows((prev) => {
+      const row = prev[studentId] || blankRow()
+      const has = row.grade10Electives.includes(subject)
+      const next = has ? row.grade10Electives.filter((s) => s !== subject) : [...row.grade10Electives, subject]
+      return { ...prev, [studentId]: { ...row, grade10Electives: next } }
+    })
+  }
+
+  function setOneOf(studentId, value) {
+    setRows((prev) => ({ ...prev, [studentId]: { ...(prev[studentId] || blankRow()), oneOfChoice: value } }))
+  }
+
+  async function saveAll() {
+    setSaving(true)
+    setSavedMsg('')
+    const subjectByName = Object.fromEntries((allSubjects || []).map((s) => [s.name, s.id]))
+    let ok = 0
+    let failed = 0
+    const CONCURRENCY = 4
+    const studentIds = students.map((s) => s.id)
+    for (let i = 0; i < studentIds.length; i += CONCURRENCY) {
+      const batch = studentIds.slice(i, i + CONCURRENCY)
+      await Promise.all(batch.map(async (studentId) => {
+        const row = rows[studentId] || blankRow()
+        const insertRows = isForm34
+          ? [
+              ...COMPULSORY_84.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: true })),
+              ...row.electives.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: false })),
+              ...(row.oneOfChoice ? [{ student_id: studentId, subject_id: subjectByName[row.oneOfChoice], is_compulsory: false }] : []),
+            ]
+          : [
+              ...GRADE10_COMPULSORY.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: true })),
+              ...row.grade10Electives.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: false })),
+            ]
+        const validRows = insertRows.filter((r) => r.subject_id)
+        const { error: deleteError } = await supabase.from('student_subjects').delete().eq('student_id', studentId)
+        if (deleteError) { failed++; return }
+        if (validRows.length > 0) {
+          const { error: insertError } = await supabase.from('student_subjects').insert(validRows)
+          if (insertError) { failed++; return }
+        }
+        ok++
+      }))
+    }
+    setSaving(false)
+    setSavedMsg(failed === 0 ? `Saved enrollment for ${ok} student${ok === 1 ? '' : 's'}.` : `Saved ${ok}, ${failed} failed — try again for the rest.`)
+    if (failed === 0) notify(`Enrollment saved for ${ok} student${ok === 1 ? '' : 's'}.`)
+  }
+
+  return (
+    <div style={pageWrap}>
+      <h2>Class Enrollment</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
+        Set every student's subjects for a whole class on one screen. Compulsory subjects are locked in automatically; pick each student's electives below, then Save All.
+      </p>
+      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
+        <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={input}>
+          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      </label>
+
+      {!loading && missingNames.length > 0 && (
+        <div style={{ ...errorText, background: '#fff4f4', border: '1px solid #f3c8c8', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+          These subject names don't match anything in your subjects table, so ticking them will silently save nothing:{' '}
+          <strong>{missingNames.join(', ')}</strong>. Check the exact spelling in your <code>subjects</code> table (e.g. run <code>select name from subjects order by name;</code> in Supabase) and let me know the real names so I can fix the pill labels.
+        </div>
+      )}
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : students.length === 0 ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No students in this class yet.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {students.map((s) => {
+            const row = rows[s.id] || blankRow()
+            return (
+              <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div style={{ fontWeight: 700 }}>{s.full_name}</div>
+                  <div style={{ fontSize: 11.5, color: COLORS.muted }}>{s.admission_no}</div>
+                </div>
+                {isForm34 ? (
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                      {COMPULSORY_84.map((n) => <span key={n} style={pillStatic}>{n}</span>)}
+                    </div>
+                    <label style={{ ...fieldLabel, maxWidth: 320, marginBottom: 8 }}>One of Computer Studies / Business Studies / Agriculture
+                      <select value={row.oneOfChoice} onChange={(e) => setOneOf(s.id, e.target.value)} style={input}>
+                        <option value="">Select…</option>
+                        {ONE_OF_GROUP.map((n) => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {FORM34_ELECTIVE_MENU.map((n) => (
+                        <span key={n} onClick={() => toggleElective(s.id, n)} style={pillBtn(row.electives.includes(n))}>{n}</span>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                      {GRADE10_COMPULSORY.map((n) => <span key={n} style={pillStatic}>{n}</span>)}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {GRADE10_ELECTIVE_MENU.map((n) => (
+                        <span key={n} onClick={() => toggleGrade10Elective(s.id, n)} style={pillBtn(row.grade10Electives.includes(n))}>{n}</span>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {students.length > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+          <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg}</span>
+          <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
+        </div>
+      )}
     </div>
   )
 }
@@ -2043,6 +2317,35 @@ const CLASS_OPTIONS = [
   { value: 'grade_10', label: 'Grade 10' },
 ]
 
+// Official KNEC KCSE subject codes. Matched against a subject's name using
+// a normalized (lowercased, non-alpha-stripped) comparison, with common
+// aliases (e.g. "CRE" / "Christian Religious Education") mapped to the same
+// code. Only used on Form 3/4 (KCSE) report cards — Grade 10 (CBC) reports
+// don't use KNEC codes. Add more aliases here as needed.
+const KCSE_SUBJECT_CODES = {
+  english: '101', kiswahili: '102', mathematics: '121', maths: '121',
+  biology: '231', physics: '232', chemistry: '233',
+  historyandgovernment: '311', history: '311',
+  geography: '312',
+  christianreligiouseducation: '313', cre: '313',
+  islamicreligiouseducation: '314', ire: '314',
+  hindureligiouseducation: '315', hre: '315',
+  homescience: '441',
+  artanddesign: '442', art: '442',
+  agriculture: '443',
+  computerstudies: '451',
+  french: '501', german: '502', arabic: '503', music: '504',
+  businessstudies: '505',
+  buildingconstruction: '565', powermechanics: '566',
+  metalwork: '567', woodwork: '568', electricity: '569',
+  drawinganddesign: '570',
+}
+
+function getKcseSubjectCode(subjectName) {
+  const key = (subjectName || '').toLowerCase().replace(/[^a-z]/g, '')
+  return KCSE_SUBJECT_CODES[key] || '—'
+}
+
 // Which curriculum each class belongs to — used to pick the right set of
 // "concurrent subject" constraints (e.g. Physics/Biology run at the same
 // time) when generating the timetable.
@@ -2198,31 +2501,28 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
     const { data: classStudents } = await supabase
       .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
     const classStudentIds = (classStudents || []).map((s) => s.id)
-    // Only show students actually enrolled in this subject — not the whole class,
-    // since Grade 10 electives (and even Form 3/4 elective groups) mean not
-    // every student in a class takes every subject. But students who predate
-    // subject-enrollment tracking (or slipped through an import without it)
-    // have NO student_subjects rows at all — for those, we can't tell what
-    // they take, so show them rather than silently hiding the whole class.
     const { data: allEnrollmentRows } = await supabase
       .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
     const enrolledForSubject = new Set(
       (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
     )
-    const anyEnrollmentRecord = new Set((allEnrollmentRows || []).map((r) => r.student_id))
-    // The "show them anyway" fallback below only makes sense for compulsory
-    // subjects (every student takes those, so missing enrollment rows are
-    // just stale data). For electives — the ONE_OF_GROUP subjects and either
-    // side of an EXCLUSION_PAIRS pair, e.g. Geography/History — an unenrolled
-    // student's subject is genuinely unknown, so they must NOT be shown to
-    // an elective teacher just because enrollment hasn't been done yet.
+    // Compulsory subjects: every student in the class takes them, so show
+    // the whole class regardless of what's (or isn't) in student_subjects —
+    // that table only needs to track electives, and relying on "does this
+    // student have ANY enrollment row at all" as a signal breaks the moment
+    // enrollment gets bulk-populated for other subjects too, silently
+    // hiding every compulsory-subject class for every teacher at once.
+    // Electives — the ONE_OF_GROUP subjects and either side of an
+    // EXCLUSION_PAIRS pair, e.g. Geography/History — must stay strictly
+    // filtered to actual enrolledForSubject matches, since an elective
+    // teacher should never see a student who doesn't take their subject.
     const subjectName = assignment.subjects?.name
     const isElectiveSubject =
       ONE_OF_GROUP.includes(subjectName) ||
       EXCLUSION_PAIRS.some((pair) => pair.includes(subjectName)) ||
       GRADE10_ELECTIVE_MENU.includes(subjectName)
     const studentData = (classStudents || []).filter(
-      (s) => enrolledForSubject.has(s.id) || (!isElectiveSubject && !anyEnrollmentRecord.has(s.id))
+      (s) => isElectiveSubject ? enrolledForSubject.has(s.id) : true
     )
     setStudents(studentData || [])
     const { data: marksData } = await supabase
@@ -2548,11 +2848,12 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
 function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const [showChangePw, setShowChangePw] = useState(false)
   const [view, setView] = useState('marks') // 'marks' | 'attendance' | 'timetable'
+  const { logoUrl } = useSchoolSettings()
   return (
     <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
       <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <img src="/crest.png" alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
+          <img src={logoUrl} alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
           <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -2587,6 +2888,528 @@ function AdminTeachingScreen({ profile }) {
         If you also teach a subject, assign it here and enter marks the same way any teacher would.
       </p>
       <MarksEntryContent teacherId={profile.id} />
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE (Bursar/Accounts): shared student picker used by Fees & Pocket Money
+// ============================================================================
+function FinanceStudentPicker({ selectedStudent, onSelect }) {
+  const [query, setQuery] = useState('')
+  const [cohortFilter, setCohortFilter] = useState('all')
+  const [students, setStudents] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    supabase.from('students').select('id, full_name, admission_no, cohort').order('full_name')
+      .then(({ data }) => { setStudents(data || []); setLoading(false) })
+  }, [])
+
+  const filtered = students.filter((s) => {
+    if (cohortFilter !== 'all' && s.cohort !== cohortFilter) return false
+    if (!query.trim()) return true
+    const q = query.trim().toLowerCase()
+    return s.full_name?.toLowerCase().includes(q) || s.admission_no?.toLowerCase().includes(q)
+  })
+
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <select value={cohortFilter} onChange={(e) => setCohortFilter(e.target.value)} style={{ ...input, width: 150, marginBottom: 0 }}>
+          <option value="all">All Classes</option>
+          {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+        <input
+          placeholder="Search student by name or admission no…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ ...input, maxWidth: 340, marginBottom: 0, flex: 1, minWidth: 200 }}
+        />
+      </div>
+      {loading ? <p style={{ color: COLORS.muted, fontSize: 13 }}>Loading students...</p> : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, maxHeight: 220, overflow: 'auto' }}>
+          {filtered.length === 0 ? (
+            <div style={{ padding: 14, fontSize: 13, color: COLORS.muted }}>No matching students.</div>
+          ) : filtered.map((s) => (
+            <div
+              key={s.id}
+              onClick={() => onSelect(s)}
+              style={{
+                padding: '10px 14px', fontSize: 13, cursor: 'pointer', borderTop: `1px solid ${COLORS.ruleLight}`,
+                background: selectedStudent?.id === s.id ? COLORS.accentSoft : 'transparent',
+              }}
+            >
+              <strong>{s.full_name}</strong>
+              <span style={{ color: COLORS.muted, marginLeft: 8 }}>{s.admission_no} · {CLASS_OPTIONS.find((c) => c.value === s.cohort)?.label || s.cohort}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE: School Fees — itemized invoices per term + a payment ledger,
+// with a running balance per student
+// ============================================================================
+// ============================================================================
+// FINANCE: on-demand receipt generation — either the built-in designed
+// receipt, or (if the school has uploaded one in Settings) their own receipt
+// design used as the page background with the payment details overlaid.
+// ============================================================================
+function buildReceiptHtml({ payment, student, invoices, payments, meta }) {
+  const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
+  const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
+  const balance = totalInvoiced - totalPaid
+  const paidDate = new Date(payment.paid_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+
+  const detailsBlock = `
+    <div style="font-size:13px;line-height:1.9;">
+      <div><strong>Receipt No:</strong> ${payment.id.slice(0, 8).toUpperCase()}</div>
+      <div><strong>Date:</strong> ${paidDate}</div>
+      <div><strong>Received From:</strong> ${student.full_name} (${student.admission_no})</div>
+      <div><strong>Amount:</strong> KES ${Number(payment.amount).toLocaleString()}</div>
+      <div><strong>Payment Method:</strong> ${payment.method}${payment.reference_no ? ` — Ref: ${payment.reference_no}` : ''}</div>
+      ${payment.note ? `<div><strong>Note:</strong> ${payment.note}</div>` : ''}
+      <div><strong>Balance After Payment:</strong> KES ${balance.toLocaleString()}</div>
+    </div>
+  `
+
+  if (meta.receiptTemplateUrl) {
+    // Custom uploaded design used as the full-page background; details are
+    // overlaid in a readable box near the bottom. Works best when the
+    // uploaded design leaves blank space there for this box.
+    return `
+      <div style="position:relative;width:800px;">
+        <img src="${meta.receiptTemplateUrl}" style="width:800px;display:block;" crossorigin="anonymous" />
+        <div style="position:absolute;left:40px;right:40px;bottom:40px;background:rgba(255,255,255,0.94);border:1px solid #ccc;border-radius:6px;padding:14px 18px;font-family:sans-serif;color:#1E2A24;">
+          ${detailsBlock}
+        </div>
+      </div>
+    `
+  }
+
+  return `
+    <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
+      <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:18px;">
+        <div style="display:flex;align-items:center;gap:16px;">
+          <img src="${meta.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
+          <div style="flex:1;">
+            <div style="font-size:22px;font-weight:800;color:#2C3E37;">Paul Wanjigi Alpine High School</div>
+            <div style="font-size:11px;color:#6B6558;margin-top:2px;">P.O. BOX 1801-20117 NAIVASHA &nbsp;·&nbsp; www.pwahigh.com</div>
+          </div>
+        </div>
+      </div>
+      <div style="text-align:center;font-size:16px;font-weight:700;letter-spacing:1px;margin-bottom:18px;color:#2C3E37;">OFFICIAL RECEIPT</div>
+      <div style="background:#F7F5EF;border:1px solid #E4DFD1;border-radius:8px;padding:18px 22px;margin-bottom:24px;">
+        ${detailsBlock}
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:60px;font-size:12px;color:#6B6558;">
+        <div>_____________________<br/>Received By</div>
+        <div>_____________________<br/>Official Stamp</div>
+      </div>
+    </div>
+  `
+}
+
+async function receiptToPdfBlob(receiptHtml) {
+  const container = document.createElement('div')
+  container.style.position = 'fixed'
+  container.style.left = '-9999px'
+  container.style.top = '0'
+  container.style.width = '800px'
+  container.style.background = '#fff'
+  container.style.padding = '24px'
+  container.style.fontFamily = 'sans-serif'
+  container.innerHTML = receiptHtml
+  document.body.appendChild(container)
+  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800, width: 800, useCORS: true })
+  document.body.removeChild(container)
+  const imgData = canvas.toDataURL('image/png')
+  const pdf = new jsPDF('p', 'mm', 'a4')
+  const pageWidth = pdf.internal.pageSize.getWidth()
+  const imgWidth = pageWidth - 20
+  const imgHeight = (canvas.height * imgWidth) / canvas.width
+  pdf.addImage(imgData, 'PNG', 10, 10, imgWidth, imgHeight)
+  return pdf.output('blob')
+}
+
+async function downloadReceipt({ payment, student, invoices, payments, meta }) {
+  const html = buildReceiptHtml({ payment, student, invoices, payments, meta })
+  const blob = await receiptToPdfBlob(html)
+  const fileName = `Receipt_${student.admission_no}_${new Date(payment.paid_at).toISOString().slice(0, 10)}.pdf`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function FeesScreen({ profile }) {
+  const { notify } = useNotify()
+  const { logoUrl, receiptTemplateUrl } = useSchoolSettings()
+  const [student, setStudent] = useState(null)
+  const [invoices, setInvoices] = useState([])
+  const [payments, setPayments] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [receiptLoadingId, setReceiptLoadingId] = useState(null)
+
+  const [invTerm, setInvTerm] = useState('Term 1')
+  const [invYear, setInvYear] = useState(new Date().getFullYear())
+  const [invAmount, setInvAmount] = useState('')
+  const [savingInvoice, setSavingInvoice] = useState(false)
+
+  const [payAmount, setPayAmount] = useState('')
+  const [payMethod, setPayMethod] = useState('Cash')
+  const [payRef, setPayRef] = useState('')
+  const [payNote, setPayNote] = useState('')
+  const [savingPayment, setSavingPayment] = useState(false)
+
+  useEffect(() => { if (student) loadLedger() }, [student])
+
+  async function loadLedger() {
+    setLoading(true)
+    const [{ data: invData }, { data: payData }] = await Promise.all([
+      supabase.from('fee_invoices').select('*').eq('student_id', student.id).order('year', { ascending: false }).order('created_at', { ascending: false }),
+      supabase.from('fee_payments').select('*').eq('student_id', student.id).order('paid_at', { ascending: false }),
+    ])
+    setInvoices(invData || [])
+    setPayments(payData || [])
+    setLoading(false)
+  }
+
+  // "General school fees" — one amount due per student per term, instead of
+  // itemized line items. Internally this still uses fee_invoices (item_name
+  // fixed to 'School Fees'), so the balance math below (totalInvoiced minus
+  // totalPaid) keeps working unchanged. Setting the amount again for a term
+  // that already has one updates it in place rather than adding a duplicate.
+  async function setFeeAmount() {
+    if (!invAmount) { notify('Enter the amount due.', 'error'); return }
+    setSavingInvoice(true)
+    const existing = invoices.find((i) => i.term === invTerm && i.year === Number(invYear) && i.item_name === 'School Fees')
+    const { error } = existing
+      ? await supabase.from('fee_invoices').update({ amount: Number(invAmount) }).eq('id', existing.id)
+      : await supabase.from('fee_invoices').insert({
+          student_id: student.id, term: invTerm, year: Number(invYear),
+          item_name: 'School Fees', amount: Number(invAmount), created_by: profile.id,
+        })
+    setSavingInvoice(false)
+    if (error) { notify(`Couldn't set fee amount: ${error.message}`, 'error'); return }
+    setInvAmount('')
+    notify(existing ? 'Fee amount updated.' : 'Fee amount set.')
+    loadLedger()
+  }
+
+  async function addPayment() {
+    if (!payAmount) { notify('Enter a payment amount.', 'error'); return }
+    setSavingPayment(true)
+    const { error } = await supabase.from('fee_payments').insert({
+      student_id: student.id, amount: Number(payAmount), method: payMethod,
+      reference_no: payRef.trim() || null, note: payNote.trim() || null, recorded_by: profile.id,
+    })
+    setSavingPayment(false)
+    if (error) { notify(`Couldn't record payment: ${error.message}`, 'error'); return }
+    setPayAmount(''); setPayRef(''); setPayNote('')
+    notify('Payment recorded.')
+    loadLedger()
+  }
+
+  async function handleDownloadReceipt(payment) {
+    setReceiptLoadingId(payment.id)
+    try {
+      await downloadReceipt({ payment, student, invoices, payments, meta: { logoUrl, receiptTemplateUrl } })
+    } catch (err) {
+      notify(`Couldn't generate receipt: ${err.message}`, 'error')
+    }
+    setReceiptLoadingId(null)
+  }
+
+  const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
+  const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
+  const balance = totalInvoiced - totalPaid
+
+  return (
+    <div style={pageWrap}>
+      <h2>School Fees</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>Search for a student to view or update their fee ledger.</p>
+      <FinanceStudentPicker selectedStudent={student} onSelect={setStudent} />
+
+      {student && (
+        loading ? <p style={{ color: COLORS.muted }}>Loading ledger...</p> : (
+          <>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 20 }}>
+              <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+                <div style={{ fontSize: 11, color: COLORS.muted }}>Total Invoiced</div>
+                <div style={{ fontSize: 18, fontWeight: 700 }}>{totalInvoiced.toLocaleString()}</div>
+              </div>
+              <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+                <div style={{ fontSize: 11, color: COLORS.muted }}>Total Paid</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.good }}>{totalPaid.toLocaleString()}</div>
+              </div>
+              <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+                <div style={{ fontSize: 11, color: COLORS.muted }}>Balance</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: balance > 0 ? COLORS.warn : COLORS.good }}>{balance.toLocaleString()}</div>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>
+              <div>
+                <h3 style={{ fontSize: 15 }}>School Fees — Amount Due</h3>
+                <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>
+                  Set the total amount this student owes for a term. Setting it again for the same term updates it — it doesn't add a duplicate.
+                </p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <select value={invTerm} onChange={(e) => setInvTerm(e.target.value)} style={{ ...input, width: 100 }}>
+                    <option>Term 1</option><option>Term 2</option><option>Term 3</option>
+                  </select>
+                  <input type="number" value={invYear} onChange={(e) => setInvYear(e.target.value)} style={{ ...input, width: 90 }} />
+                  <input type="number" placeholder="Amount Due" value={invAmount} onChange={(e) => setInvAmount(e.target.value)} style={{ ...input, flex: 1, minWidth: 120 }} />
+                  <button onClick={setFeeAmount} disabled={savingInvoice} style={btn}>{savingInvoice ? 'Saving...' : 'Set Amount'}</button>
+                </div>
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th></tr></thead>
+                    <tbody>
+                      {invoices.map((i) => (
+                        <tr key={i.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                          <td style={td}>{i.term} {i.year}</td>
+                          <td style={{ ...td, textAlign: 'right' }}>{Number(i.amount).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                      {invoices.length === 0 && <tr><td colSpan={2} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div>
+                <h3 style={{ fontSize: 15 }}>Payments</h3>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <input type="number" placeholder="Amount" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} style={{ ...input, width: 110 }} />
+                  <select value={payMethod} onChange={(e) => setPayMethod(e.target.value)} style={{ ...input, width: 110 }}>
+                    <option>Cash</option><option>M-Pesa</option><option>Bank</option><option>Cheque</option>
+                  </select>
+                  <input placeholder="Reference no. (optional)" value={payRef} onChange={(e) => setPayRef(e.target.value)} style={{ ...input, width: 140 }} />
+                  <input placeholder="Note (optional)" value={payNote} onChange={(e) => setPayNote(e.target.value)} style={{ ...input, flex: 1, minWidth: 120 }} />
+                  <button onClick={addPayment} disabled={savingPayment} style={btn}>{savingPayment ? 'Recording...' : 'Record'}</button>
+                </div>
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                    <thead><tr><th style={th}>Date</th><th style={th}>Method</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th><th style={th}></th></tr></thead>
+                    <tbody>
+                      {payments.map((p) => (
+                        <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                          <td style={td}>{new Date(p.paid_at).toLocaleDateString()}</td>
+                          <td style={td}>{p.method}{p.reference_no ? ` (${p.reference_no})` : ''}</td>
+                          <td style={{ ...td, textAlign: 'right' }}>{Number(p.amount).toLocaleString()}</td>
+                          <td style={{ ...td, color: COLORS.muted }}>{p.note || '—'}</td>
+                          <td style={td}>
+                            <button
+                              onClick={() => handleDownloadReceipt(p)}
+                              disabled={receiptLoadingId === p.id}
+                              style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
+                            >
+                              {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {payments.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No payments recorded yet.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </>
+        )
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE: Pocket Money — full transaction history (deposits/withdrawals)
+// per student, with a running balance
+// ============================================================================
+function PocketMoneyScreen({ profile }) {
+  const { notify } = useNotify()
+  const [student, setStudent] = useState(null)
+  const [transactions, setTransactions] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  const [txType, setTxType] = useState('deposit')
+  const [txAmount, setTxAmount] = useState('')
+  const [txNote, setTxNote] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => { if (student) loadTransactions() }, [student])
+
+  async function loadTransactions() {
+    setLoading(true)
+    const { data } = await supabase
+      .from('pocket_money_transactions').select('*').eq('student_id', student.id).order('created_at', { ascending: false })
+    setTransactions(data || [])
+    setLoading(false)
+  }
+
+  async function addTransaction() {
+    if (!txAmount || Number(txAmount) <= 0) { notify('Enter a valid amount.', 'error'); return }
+    setSaving(true)
+    const { error } = await supabase.from('pocket_money_transactions').insert({
+      student_id: student.id, type: txType, amount: Number(txAmount), note: txNote.trim() || null, recorded_by: profile.id,
+    })
+    setSaving(false)
+    if (error) { notify(`Couldn't save transaction: ${error.message}`, 'error'); return }
+    setTxAmount(''); setTxNote('')
+    notify(`${txType === 'deposit' ? 'Deposit' : 'Withdrawal'} recorded.`)
+    loadTransactions()
+  }
+
+  const balance = transactions.reduce((sum, t) => sum + (t.type === 'deposit' ? Number(t.amount) : -Number(t.amount)), 0)
+
+  return (
+    <div style={pageWrap}>
+      <h2>Pocket Money</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>Search for a student to view or update their pocket money balance.</p>
+      <FinanceStudentPicker selectedStudent={student} onSelect={setStudent} />
+
+      {student && (
+        loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+          <>
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px', marginBottom: 16, maxWidth: 220 }}>
+              <div style={{ fontSize: 11, color: COLORS.muted }}>Current Balance</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{balance.toLocaleString()}</div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+              <select value={txType} onChange={(e) => setTxType(e.target.value)} style={{ ...input, width: 130 }}>
+                <option value="deposit">Deposit</option>
+                <option value="withdrawal">Withdrawal</option>
+              </select>
+              <input type="number" placeholder="Amount" value={txAmount} onChange={(e) => setTxAmount(e.target.value)} style={{ ...input, width: 110 }} />
+              <input placeholder="Note (optional)" value={txNote} onChange={(e) => setTxNote(e.target.value)} style={{ ...input, flex: 1, minWidth: 160 }} />
+              <button onClick={addTransaction} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Add'}</button>
+            </div>
+
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                <thead><tr><th style={th}>Date</th><th style={th}>Type</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th></tr></thead>
+                <tbody>
+                  {transactions.map((t) => (
+                    <tr key={t.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                      <td style={td}>{new Date(t.created_at).toLocaleDateString()}</td>
+                      <td style={{ ...td, color: t.type === 'deposit' ? COLORS.good : COLORS.warn, fontWeight: 600 }}>
+                        {t.type === 'deposit' ? 'Deposit' : 'Withdrawal'}
+                      </td>
+                      <td style={{ ...td, textAlign: 'right' }}>{Number(t.amount).toLocaleString()}</td>
+                      <td style={{ ...td, color: COLORS.muted }}>{t.note || '—'}</td>
+                    </tr>
+                  ))}
+                  {transactions.length === 0 && <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No transactions yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE: basic student lookup (names/admission numbers only — no marks,
+// no other admin data)
+// ============================================================================
+function FinanceStudentLookup() {
+  const [query, setQuery] = useState('')
+  const [cohortFilter, setCohortFilter] = useState('all')
+  const [students, setStudents] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  const cohortOptions = [
+    { value: 'all', label: 'All Classes' },
+    { value: 'form_3', label: 'Form 3' },
+    { value: 'form_4', label: 'Form 4' },
+    { value: 'grade_10', label: 'Grade 10' },
+  ]
+
+  useEffect(() => {
+    supabase.from('students').select('id, full_name, admission_no, cohort').order('full_name')
+      .then(({ data }) => { setStudents(data || []); setLoading(false) })
+  }, [])
+
+  const filtered = students.filter((s) => {
+    if (cohortFilter !== 'all' && s.cohort !== cohortFilter) return false
+    if (!query.trim()) return true
+    const q = query.trim().toLowerCase()
+    return s.full_name?.toLowerCase().includes(q) || s.admission_no?.toLowerCase().includes(q)
+  })
+
+  return (
+    <div style={pageWrap}>
+      <h2>Students</h2>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+        <input placeholder="Search by name or admission no…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ ...input, maxWidth: 260 }} />
+        <select value={cohortFilter} onChange={(e) => setCohortFilter(e.target.value)} style={{ ...input, maxWidth: 160 }}>
+          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+        </select>
+      </div>
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead><tr><th style={th}>Full Name</th><th style={th}>Admission No.</th><th style={th}>Class</th></tr></thead>
+            <tbody>
+              {filtered.map((s) => (
+                <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                  <td style={td}>{s.full_name}</td>
+                  <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
+                  <td style={td}>{CLASS_OPTIONS.find((c) => c.value === s.cohort)?.label || s.cohort}</td>
+                </tr>
+              ))}
+              {filtered.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No students found.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE: full-page home (own header + logout), parallel to MarksEntryScreen
+// but scoped to Fees, Pocket Money, and a basic student lookup only
+// ============================================================================
+function FinanceHome({ profile, onLogout }) {
+  const [showChangePw, setShowChangePw] = useState(false)
+  const [view, setView] = useState('fees') // 'fees' | 'pocket' | 'students'
+  const { logoUrl } = useSchoolSettings()
+  return (
+    <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
+      <div style={{ background: COLORS.band, color: COLORS.bandText, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src={logoUrl} alt="Crest" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />
+          <div style={{ fontWeight: 700 }}>Paul Wanjigi Alpine — Records</div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <span style={{ fontSize: 12 }}>{profile.full_name}</span>
+          <button onClick={() => setShowChangePw(true)} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)', fontSize: 12 }}>Change Password</button>
+          <button onClick={onLogout} style={{ ...secondaryBtn, background: 'transparent', color: COLORS.bandText, borderColor: 'rgba(255,255,255,0.3)' }}>Log out</button>
+        </div>
+      </div>
+      <div style={pageWrap}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          <button onClick={() => setView('fees')} style={view === 'fees' ? btn : secondaryBtn}>School Fees</button>
+          <button onClick={() => setView('pocket')} style={view === 'pocket' ? btn : secondaryBtn}>Pocket Money</button>
+          <button onClick={() => setView('students')} style={view === 'students' ? btn : secondaryBtn}>Students</button>
+        </div>
+        {view === 'fees' && <FeesScreen profile={profile} />}
+        {view === 'pocket' && <PocketMoneyScreen profile={profile} />}
+        {view === 'students' && <FinanceStudentLookup />}
+      </div>
+      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </div>
   )
 }
@@ -2756,7 +3579,22 @@ function buildProgressGraphSvg(timeline) {
 }
 
 function buildReportHtml(report) {
-  const rowsHtml = report.subjectRows.map((r) => `
+  const isKcse = !report.isCbc
+  // KCSE reports: order subjects by their official KNEC code (ascending).
+  // Subjects with no matching code (getKcseSubjectCode returns '—') sort
+  // after all coded ones, keeping their original relative order.
+  const orderedSubjectRows = isKcse
+    ? [...report.subjectRows].sort((a, b) => {
+        const codeA = getKcseSubjectCode(a.name)
+        const codeB = getKcseSubjectCode(b.name)
+        if (codeA === '—' && codeB === '—') return 0
+        if (codeA === '—') return 1
+        if (codeB === '—') return -1
+        return codeA.localeCompare(codeB)
+      })
+    : report.subjectRows
+
+  const rowsHtml = orderedSubjectRows.map((r) => `
     <tr style="border-top:1px solid #E4DFD1;">
       <td style="padding:7px 10px;">${r.name}${r.is_compulsory ? ' *' : ''}</td>
       <td style="padding:7px 10px;">${r.prevGrade || '—'}</td>
@@ -2770,15 +3608,16 @@ function buildReportHtml(report) {
 
   return `
     <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
-      <!-- Letterhead -->
+      <!-- Letterhead: logo left, school details centered, second logo right -->
       <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:6px;">
-        <div style="display:flex;align-items:center;gap:16px;">
-          <img src="/crest.png" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
-          <div style="flex:1;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+          <img src="${reportBrandingCache.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
+          <div style="flex:1;text-align:center;">
             <div style="font-size:24px;font-weight:800;color:#2C3E37;line-height:1.15;">Paul Wanjigi Alpine High School</div>
             <div style="font-size:11.5px;color:#6B6558;margin-top:2px;">P.O. BOX 1801-20117 NAIVASHA &nbsp;·&nbsp; www.pwahigh.com</div>
             <div style="font-size:11.5px;color:#9C6B2E;font-weight:700;margin-top:2px;">Mission: To graduate leaders with integrity</div>
           </div>
+          <img src="${reportBrandingCache.secondaryLogoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
         </div>
       </div>
 
@@ -2887,7 +3726,7 @@ async function reportToPdfBlob(report) {
   container.innerHTML = buildReportHtml(report)
 
   document.body.appendChild(container)
-  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800, width: 800 })
+  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800, width: 800, useCORS: true })
   document.body.removeChild(container)
 
   const imgData = canvas.toDataURL('image/png')
@@ -5301,6 +6140,114 @@ function ScaleEditor({ table, scale, loading, reload, labelPlaceholder, defaultL
   )
 }
 
+// ============================================================================
+// SETTINGS: Branding — upload school logo (used everywhere) and an optional
+// custom receipt design (used as the background for generated receipts)
+// ============================================================================
+function BrandingSettings() {
+  const { notify } = useNotify()
+  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, reload } = useSchoolSettings()
+  const [uploadingLogo, setUploadingLogo] = useState(false)
+  const [uploadingSecondaryLogo, setUploadingSecondaryLogo] = useState(false)
+  const [uploadingReceipt, setUploadingReceipt] = useState(false)
+
+  async function ensureSettingsRow() {
+    // The row (id=1) may not exist yet on a fresh install — create it once.
+    await supabase.from('school_settings').upsert({ id: 1 }, { onConflict: 'id', ignoreDuplicates: true })
+  }
+
+  const uploaderByField = {
+    logo_url: setUploadingLogo,
+    secondary_logo_url: setUploadingSecondaryLogo,
+    receipt_template_url: setUploadingReceipt,
+  }
+
+  async function uploadFile(file, field) {
+    const setUploading = uploaderByField[field]
+    setUploading(true)
+    await ensureSettingsRow()
+    const ext = file.name.split('.').pop()
+    const path = `${field}-${Date.now()}.${ext}`
+    const { error: uploadError } = await supabase.storage.from('branding').upload(path, file)
+    if (uploadError) { notify(`Upload failed: ${uploadError.message}`, 'error'); setUploading(false); return }
+    const { data } = supabase.storage.from('branding').getPublicUrl(path)
+    const { error: updateError } = await supabase.from('school_settings').update({ [field]: data.publicUrl }).eq('id', 1)
+    setUploading(false)
+    if (updateError) { notify(`Couldn't save: ${updateError.message}`, 'error'); return }
+    notify('Updated.')
+    reload()
+  }
+
+  async function clearField(field) {
+    const { error } = await supabase.from('school_settings').update({ [field]: null }).eq('id', 1)
+    if (error) { notify(`Couldn't reset: ${error.message}`, 'error'); return }
+    notify('Reset to default.')
+    reload()
+  }
+
+  return (
+    <div>
+      <div style={sectionLabel}>School logo</div>
+      <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>
+        Shown in the header everywhere in the app, and on the left side of the report card letterhead. Upload a square image for best results.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 }}>
+        <img src={logoUrl} alt="Current logo" style={{ width: 56, height: 56, borderRadius: '50%', objectFit: 'cover', border: `1px solid ${COLORS.ruleLight}` }} />
+        <label style={{ ...secondaryBtn, cursor: 'pointer' }}>
+          {uploadingLogo ? 'Uploading...' : 'Upload New Logo'}
+          <input type="file" accept="image/*" style={{ display: 'none' }} disabled={uploadingLogo}
+            onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0], 'logo_url')} />
+        </label>
+        {logoUrl !== '/crest.png' && (
+          <button onClick={() => clearField('logo_url')} style={{ ...secondaryBtn, color: COLORS.warn }}>Reset to Default</button>
+        )}
+      </div>
+
+      <div style={sectionLabel}>Second logo (report card letterhead, right side)</div>
+      <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>
+        Optional. Shown on the right of the school logo on report cards only — e.g. a Ministry of Education, CBC,
+        or accreditation logo. Leave empty to show the school logo on both sides.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 }}>
+        <img src={secondaryLogoUrl} alt="Second logo" style={{ width: 56, height: 56, borderRadius: '50%', objectFit: 'cover', border: `1px solid ${COLORS.ruleLight}` }} />
+        <label style={{ ...secondaryBtn, cursor: 'pointer' }}>
+          {uploadingSecondaryLogo ? 'Uploading...' : 'Upload Second Logo'}
+          <input type="file" accept="image/*" style={{ display: 'none' }} disabled={uploadingSecondaryLogo}
+            onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0], 'secondary_logo_url')} />
+        </label>
+        {secondaryLogoUrl !== '/crest.png' && (
+          <button onClick={() => clearField('secondary_logo_url')} style={{ ...secondaryBtn, color: COLORS.warn }}>Reset to Default</button>
+        )}
+      </div>
+
+      <div style={sectionLabel}>Custom receipt design</div>
+      <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>
+        Optional. Upload your own receipt design (image) and it will be used as the background for every receipt
+        the Bursar generates, with the payment details overlaid near the bottom. Leave this empty to use the
+        built-in receipt design instead. For best results, leave blank space near the bottom of your design for
+        the overlaid details.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        {receiptTemplateUrl ? (
+          <img src={receiptTemplateUrl} alt="Custom receipt design" style={{ width: 80, height: 'auto', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 4 }} />
+        ) : (
+          <div style={{ width: 80, height: 56, border: `1px dashed ${COLORS.ruleLight}`, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: COLORS.muted, textAlign: 'center' }}>
+            Using default design
+          </div>
+        )}
+        <label style={{ ...secondaryBtn, cursor: 'pointer' }}>
+          {uploadingReceipt ? 'Uploading...' : 'Upload Receipt Design'}
+          <input type="file" accept="image/*" style={{ display: 'none' }} disabled={uploadingReceipt}
+            onChange={(e) => e.target.files[0] && uploadFile(e.target.files[0], 'receipt_template_url')} />
+        </label>
+        {receiptTemplateUrl && (
+          <button onClick={() => clearField('receipt_template_url')} style={{ ...secondaryBtn, color: COLORS.warn }}>Remove (Use Default)</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SettingsScreen() {
   const { scale: kcseScale, loading: kcseLoading, reload: reloadKcse } = useGradeScale()
   const { scale: cbcScale, loading: cbcLoading, reload: reloadCbc } = useCbcScale()
@@ -5311,6 +6258,9 @@ function SettingsScreen() {
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
         Customize the grading scales used across the school. Each cohort's scale is independent, so changing one does not affect the other.
       </p>
+
+      <BrandingSettings />
+      <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, margin: '28px 0' }} />
 
       <div style={sectionLabel}>KCSE grading scale (Form 1–4)</div>
       <ScaleEditor
@@ -5355,13 +6305,15 @@ export default function App() {
   return (
     <GateScreen>
       <NotificationProvider>
-        <GradeScaleProvider>
-          <CbcScaleProvider>
-            <ConcurrentGroupsProvider>
-              <AppContent />
-            </ConcurrentGroupsProvider>
-          </CbcScaleProvider>
-        </GradeScaleProvider>
+        <SchoolSettingsProvider>
+          <GradeScaleProvider>
+            <CbcScaleProvider>
+              <ConcurrentGroupsProvider>
+                <AppContent />
+              </ConcurrentGroupsProvider>
+            </CbcScaleProvider>
+          </GradeScaleProvider>
+        </SchoolSettingsProvider>
       </NotificationProvider>
     </GateScreen>
   )
@@ -5405,8 +6357,11 @@ function AppContent() {
   }
 
   if (session && profile) {
-    if (profile.role === 'teacher' && profile.status !== 'approved') {
+    if ((profile.role === 'teacher' || profile.role === 'finance') && profile.status !== 'approved') {
       return <PendingApproval fullName={profile.full_name} onLogout={handleLogout} />
+    }
+    if (profile.role === 'finance') {
+      return <FinanceHome profile={profile} onLogout={handleLogout} />
     }
     if (profile.role === 'admin') {
       return (
@@ -5422,6 +6377,7 @@ function AppContent() {
             {tab === 'Timetable' && <TimetableScreen />}
             {tab === 'Profiles' && <TeachersScreen currentUserId={profile.id} />}
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
+            {tab === 'Enrollment' && LEADERSHIP_TITLES.includes(profile.title) && <BulkEnrollmentScreen />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
             {tab === 'Settings' && <SettingsScreen />}
