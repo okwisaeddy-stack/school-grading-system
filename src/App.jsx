@@ -2210,8 +2210,19 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
       (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
     )
     const anyEnrollmentRecord = new Set((allEnrollmentRows || []).map((r) => r.student_id))
+    // The "show them anyway" fallback below only makes sense for compulsory
+    // subjects (every student takes those, so missing enrollment rows are
+    // just stale data). For electives — the ONE_OF_GROUP subjects and either
+    // side of an EXCLUSION_PAIRS pair, e.g. Geography/History — an unenrolled
+    // student's subject is genuinely unknown, so they must NOT be shown to
+    // an elective teacher just because enrollment hasn't been done yet.
+    const subjectName = assignment.subjects?.name
+    const isElectiveSubject =
+      ONE_OF_GROUP.includes(subjectName) ||
+      EXCLUSION_PAIRS.some((pair) => pair.includes(subjectName)) ||
+      GRADE10_ELECTIVE_MENU.includes(subjectName)
     const studentData = (classStudents || []).filter(
-      (s) => enrolledForSubject.has(s.id) || !anyEnrollmentRecord.has(s.id)
+      (s) => enrolledForSubject.has(s.id) || (!isElectiveSubject && !anyEnrollmentRecord.has(s.id))
     )
     setStudents(studentData || [])
     const { data: marksData } = await supabase
