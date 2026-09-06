@@ -210,17 +210,34 @@ function CbcScaleProvider({ children }) {
 // instead. The provider keeps the cache in sync every time it (re)loads.
 // ============================================================================
 const SchoolSettingsContext = createContext(null)
-const reportBrandingCache = { logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png' }
+// Defaults match what was previously hardcoded in buildReceiptCellHtml / buildReportHtml.
+const DEFAULT_RECEIPT_WATERMARK_OPACITY = 0.16
+const DEFAULT_REPORT_WATERMARK_OPACITY = 0.05
+const reportBrandingCache = {
+  logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png',
+  watermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, watermarkOffsetX: 0, watermarkOffsetY: 0,
+}
 
 function useSchoolSettings() {
   const ctx = useContext(SchoolSettingsContext)
-  return ctx || { logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png', receiptTemplateUrl: null, loading: false, reload: () => {} }
+  return ctx || {
+    logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png', receiptTemplateUrl: null,
+    receiptWatermarkOpacity: DEFAULT_RECEIPT_WATERMARK_OPACITY, receiptWatermarkOffsetX: 0, receiptWatermarkOffsetY: 0,
+    reportWatermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, reportWatermarkOffsetX: 0, reportWatermarkOffsetY: 0,
+    loading: false, reload: () => {},
+  }
 }
 
 function SchoolSettingsProvider({ children }) {
   const [logoUrl, setLogoUrl] = useState('/crest.png')
   const [secondaryLogoUrl, setSecondaryLogoUrl] = useState('/crest.png')
   const [receiptTemplateUrl, setReceiptTemplateUrl] = useState(null)
+  const [receiptWatermarkOpacity, setReceiptWatermarkOpacity] = useState(DEFAULT_RECEIPT_WATERMARK_OPACITY)
+  const [receiptWatermarkOffsetX, setReceiptWatermarkOffsetX] = useState(0)
+  const [receiptWatermarkOffsetY, setReceiptWatermarkOffsetY] = useState(0)
+  const [reportWatermarkOpacity, setReportWatermarkOpacity] = useState(DEFAULT_REPORT_WATERMARK_OPACITY)
+  const [reportWatermarkOffsetX, setReportWatermarkOffsetX] = useState(0)
+  const [reportWatermarkOffsetY, setReportWatermarkOffsetY] = useState(0)
   const [loading, setLoading] = useState(true)
 
   const reload = useCallback(async () => {
@@ -228,18 +245,38 @@ function SchoolSettingsProvider({ children }) {
     const { data } = await supabase.from('school_settings').select('*').eq('id', 1).single()
     const resolvedLogo = data?.logo_url || '/crest.png'
     const resolvedSecondary = data?.secondary_logo_url || '/crest.png'
+    const resolvedReceiptOpacity = data?.receipt_watermark_opacity ?? DEFAULT_RECEIPT_WATERMARK_OPACITY
+    const resolvedReceiptOffsetX = data?.receipt_watermark_offset_x ?? 0
+    const resolvedReceiptOffsetY = data?.receipt_watermark_offset_y ?? 0
+    const resolvedReportOpacity = data?.report_watermark_opacity ?? DEFAULT_REPORT_WATERMARK_OPACITY
+    const resolvedReportOffsetX = data?.report_watermark_offset_x ?? 0
+    const resolvedReportOffsetY = data?.report_watermark_offset_y ?? 0
     setLogoUrl(resolvedLogo)
     setSecondaryLogoUrl(resolvedSecondary)
     setReceiptTemplateUrl(data?.receipt_template_url || null)
+    setReceiptWatermarkOpacity(resolvedReceiptOpacity)
+    setReceiptWatermarkOffsetX(resolvedReceiptOffsetX)
+    setReceiptWatermarkOffsetY(resolvedReceiptOffsetY)
+    setReportWatermarkOpacity(resolvedReportOpacity)
+    setReportWatermarkOffsetX(resolvedReportOffsetX)
+    setReportWatermarkOffsetY(resolvedReportOffsetY)
     reportBrandingCache.logoUrl = resolvedLogo
     reportBrandingCache.secondaryLogoUrl = resolvedSecondary
+    reportBrandingCache.watermarkOpacity = resolvedReportOpacity
+    reportBrandingCache.watermarkOffsetX = resolvedReportOffsetX
+    reportBrandingCache.watermarkOffsetY = resolvedReportOffsetY
     setLoading(false)
   }, [])
 
   useEffect(() => { reload() }, [reload])
 
   return (
-    <SchoolSettingsContext.Provider value={{ logoUrl, secondaryLogoUrl, receiptTemplateUrl, loading, reload }}>
+    <SchoolSettingsContext.Provider value={{
+      logoUrl, secondaryLogoUrl, receiptTemplateUrl,
+      receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
+      reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
+      loading, reload,
+    }}>
       {children}
     </SchoolSettingsContext.Provider>
   )
@@ -2997,10 +3034,14 @@ function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
     `
   }
 
+  const receiptWatermarkOpacity = meta.receiptWatermarkOpacity ?? DEFAULT_RECEIPT_WATERMARK_OPACITY
+  const receiptWatermarkOffsetX = meta.receiptWatermarkOffsetX ?? 0
+  const receiptWatermarkOffsetY = meta.receiptWatermarkOffsetY ?? 0
+
   return `
     <div style="position:relative;width:100%;height:100%;font-family:sans-serif;color:#1E2A24;border-radius:12px;border:1px solid #E4DFD1;overflow:hidden;background:#FFFFFF;box-sizing:border-box;">
-      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:50%;left:50%;width:70%;transform:translate(-50%,-50%);opacity:0.16;filter:grayscale(1);pointer-events:none;" />
-      <div style="position:relative;padding:12px 14px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
+      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(50% + ${receiptWatermarkOffsetY}px);left:calc(50% + ${receiptWatermarkOffsetX}px);width:70%;transform:translate(-50%,-50%);opacity:${receiptWatermarkOpacity};filter:grayscale(1);pointer-events:none;z-index:0;" />
+      <div style="position:relative;z-index:1;padding:12px 14px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
         <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #2C3E37;padding-bottom:6px;margin-bottom:8px;">
           <img src="${meta.logoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
           <div style="flex:1;text-align:center;padding:0 6px;">
@@ -3010,7 +3051,7 @@ function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
           <img src="${meta.secondaryLogoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
         </div>
         <div style="text-align:center;font-size:10.5px;font-weight:700;letter-spacing:0.6px;color:#2C3E37;margin-bottom:8px;">OFFICIAL RECEIPT</div>
-        <div style="background:#F7F5EF;border:1px solid #E4DFD1;border-radius:8px;padding:8px 10px;flex:1;">
+        <div style="background:rgba(247,245,239,0.88);border:1px solid #E4DFD1;border-radius:8px;padding:8px 10px;flex:1;">
           ${detailsBlock}
         </div>
         <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:8.5px;color:#6B6558;">
@@ -3094,12 +3135,14 @@ async function downloadReceipt({ payment, student, invoices, payments, meta }) {
 
 function FeesScreen({ profile }) {
   const { notify } = useNotify()
-  const { logoUrl, receiptTemplateUrl } = useSchoolSettings()
+  const { logoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
   const [student, setStudent] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [payments, setPayments] = useState([])
   const [loading, setLoading] = useState(false)
   const [receiptLoadingId, setReceiptLoadingId] = useState(null)
+  const [previewReceipt, setPreviewReceipt] = useState(null) // { pageHtml, payment }
+  const [downloadingReceipt, setDownloadingReceipt] = useState(false)
 
   const [invTerm, setInvTerm] = useState('Term 1')
   const [invYear, setInvYear] = useState(new Date().getFullYear())
@@ -3111,6 +3154,7 @@ function FeesScreen({ profile }) {
   const [payRef, setPayRef] = useState('')
   const [payNote, setPayNote] = useState('')
   const [savingPayment, setSavingPayment] = useState(false)
+  const [paymentSearch, setPaymentSearch] = useState('')
 
   useEffect(() => { if (student) loadLedger() }, [student])
 
@@ -3177,19 +3221,52 @@ function FeesScreen({ profile }) {
     loadLedger()
   }
 
-  async function handleDownloadReceipt(payment) {
+  function handlePreviewReceipt(payment) {
     setReceiptLoadingId(payment.id)
     try {
-      await downloadReceipt({ payment, student, invoices, payments, meta: { logoUrl, receiptTemplateUrl } })
+      const meta = { logoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY }
+      const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta })
+      const pageHtml = buildReceiptPageHtml(cellHtml)
+      setPreviewReceipt({ pageHtml, payment })
+    } catch (err) {
+      notify(`Couldn't build receipt preview: ${err.message}`, 'error')
+    }
+    setReceiptLoadingId(null)
+  }
+
+  async function confirmDownloadReceipt() {
+    if (!previewReceipt) return
+    setDownloadingReceipt(true)
+    try {
+      const blob = await receiptToPdfBlob(previewReceipt.pageHtml)
+      const fileName = `Receipt_${student.admission_no}_${new Date(previewReceipt.payment.paid_at).toISOString().slice(0, 10)}.pdf`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      URL.revokeObjectURL(url)
+      setPreviewReceipt(null)
     } catch (err) {
       notify(`Couldn't generate receipt: ${err.message}`, 'error')
     }
-    setReceiptLoadingId(null)
+    setDownloadingReceipt(false)
   }
 
   const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
   const balance = totalInvoiced - totalPaid
+
+  const filteredPayments = payments.filter((p) => {
+    const q = paymentSearch.trim().toLowerCase()
+    if (!q) return true
+    return (
+      p.method?.toLowerCase().includes(q) ||
+      p.reference_no?.toLowerCase().includes(q) ||
+      p.note?.toLowerCase().includes(q) ||
+      String(p.amount).includes(q)
+    )
+  })
 
   return (
     <div style={{ ...pageWrap, maxWidth: 'none', width: '100%' }}>
@@ -3259,11 +3336,17 @@ function FeesScreen({ profile }) {
                   <input placeholder="Note (optional)" value={payNote} onChange={(e) => setPayNote(e.target.value)} style={{ ...input, flex: 1, minWidth: 120 }} />
                   <button onClick={addPayment} disabled={savingPayment} style={btn}>{savingPayment ? 'Recording...' : 'Record'}</button>
                 </div>
+                <input
+                  placeholder="Search payments by method, reference, note, or amount…"
+                  value={paymentSearch}
+                  onChange={(e) => setPaymentSearch(e.target.value)}
+                  style={{ ...input, width: '100%', marginBottom: 10 }}
+                />
                 <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                     <thead><tr><th style={th}>Date</th><th style={th}>Method</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th><th style={th}></th></tr></thead>
                     <tbody>
-                      {payments.map((p) => (
+                      {filteredPayments.map((p) => (
                         <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                           <td style={td}>{new Date(p.paid_at).toLocaleDateString()}</td>
                           <td style={td}>{p.method}{p.reference_no ? ` (${p.reference_no})` : ''}</td>
@@ -3271,16 +3354,17 @@ function FeesScreen({ profile }) {
                           <td style={{ ...td, color: COLORS.muted }}>{p.note || '—'}</td>
                           <td style={td}>
                             <button
-                              onClick={() => handleDownloadReceipt(p)}
+                              onClick={() => handlePreviewReceipt(p)}
                               disabled={receiptLoadingId === p.id}
                               style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
                             >
-                              {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
+                              {receiptLoadingId === p.id ? 'Building...' : 'Receipt'}
                             </button>
                           </td>
                         </tr>
                       ))}
                       {payments.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No payments recorded yet.</td></tr>}
+                      {payments.length > 0 && filteredPayments.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No payments match your search.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -3288,6 +3372,23 @@ function FeesScreen({ profile }) {
             </div>
           </>
         )
+      )}
+
+      {previewReceipt && (
+        <div style={modalOverlay}>
+          <div style={{ ...modalCard, maxWidth: 420 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Receipt Preview</h3>
+            <div style={{ width: 330, height: 465, overflow: 'hidden', margin: '0 auto 16px', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
+              <div style={{ width: 780, height: 1100, transform: 'scale(0.423)', transformOrigin: 'top left' }} dangerouslySetInnerHTML={{ __html: previewReceipt.pageHtml }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button onClick={() => setPreviewReceipt(null)} style={secondaryBtn} disabled={downloadingReceipt}>Cancel</button>
+              <button onClick={confirmDownloadReceipt} style={btn} disabled={downloadingReceipt}>
+                {downloadingReceipt ? 'Preparing PDF...' : '⬇ Download Receipt'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -3307,7 +3408,7 @@ function FeesScreen({ profile }) {
 // ============================================================================
 function ClassReceiptsScreen({ profile }) {
   const { notify } = useNotify()
-  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl } = useSchoolSettings()
+  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
   const [cohort, setCohort] = useState(CLASS_OPTIONS[0].value)
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState([]) // { student, invoices, payments, unreceiptedPayments, balance }
@@ -3359,7 +3460,7 @@ function ClassReceiptsScreen({ profile }) {
     const list = selectedPaymentsList()
     if (list.length === 0) { notify('No students selected — nothing to generate.', 'error'); return }
     setGenerating(true)
-    const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl }
+    const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY }
     const cells = list.map(({ row, payment }) =>
       buildReceiptCellHtml({ payment, student: row.student, invoices: row.invoices, payments: row.payments, meta })
     )
@@ -3497,6 +3598,7 @@ function PocketMoneyScreen({ profile }) {
   const [txAmount, setTxAmount] = useState('')
   const [txNote, setTxNote] = useState('')
   const [saving, setSaving] = useState(false)
+  const [txSearch, setTxSearch] = useState('')
 
   useEffect(() => { if (student) loadTransactions() }, [student])
 
@@ -3531,6 +3633,16 @@ function PocketMoneyScreen({ profile }) {
 
   const balance = transactions.reduce((sum, t) => sum + (t.type === 'deposit' ? Number(t.amount) : -Number(t.amount)), 0)
 
+  const filteredTransactions = transactions.filter((t) => {
+    const q = txSearch.trim().toLowerCase()
+    if (!q) return true
+    return (
+      t.type?.toLowerCase().includes(q) ||
+      t.note?.toLowerCase().includes(q) ||
+      String(t.amount).includes(q)
+    )
+  })
+
   return (
     <div style={pageWrap}>
       <h2>Pocket Money</h2>
@@ -3555,11 +3667,18 @@ function PocketMoneyScreen({ profile }) {
               <button onClick={addTransaction} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Add'}</button>
             </div>
 
+            <input
+              placeholder="Search transactions by type, note, or amount…"
+              value={txSearch}
+              onChange={(e) => setTxSearch(e.target.value)}
+              style={{ ...input, width: '100%', marginBottom: 10 }}
+            />
+
             <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                 <thead><tr><th style={th}>Date</th><th style={th}>Type</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th><th style={th}></th></tr></thead>
                 <tbody>
-                  {transactions.map((t) => (
+                  {filteredTransactions.map((t) => (
                     <tr key={t.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                       <td style={td}>{new Date(t.created_at).toLocaleDateString()}</td>
                       <td style={{ ...td, color: t.type === 'deposit' ? COLORS.good : COLORS.warn, fontWeight: 600 }}>
@@ -3573,6 +3692,7 @@ function PocketMoneyScreen({ profile }) {
                     </tr>
                   ))}
                   {transactions.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No transactions yet.</td></tr>}
+                  {transactions.length > 0 && filteredTransactions.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No transactions match your search.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -3844,7 +3964,10 @@ function buildProgressGraphSvg(timeline) {
   `
 }
 
-function buildReportHtml(report) {
+function buildReportHtml(report, watermarkOverride) {
+  const reportWatermarkOpacity = watermarkOverride?.opacity ?? reportBrandingCache.watermarkOpacity ?? DEFAULT_REPORT_WATERMARK_OPACITY
+  const reportWatermarkOffsetX = watermarkOverride?.offsetX ?? reportBrandingCache.watermarkOffsetX ?? 0
+  const reportWatermarkOffsetY = watermarkOverride?.offsetY ?? reportBrandingCache.watermarkOffsetY ?? 0
   const isKcse = !report.isCbc
   // KCSE reports: order subjects by their official KNEC code (ascending).
   // Subjects with no matching code (getKcseSubjectCode returns '—') sort
@@ -3874,7 +3997,7 @@ function buildReportHtml(report) {
 
   return `
     <div style="position:relative;max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
-      <img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:280px;left:50%;width:480px;transform:translate(-50%,0);opacity:0.05;pointer-events:none;z-index:0;" />
+      <img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(280px + ${reportWatermarkOffsetY}px);left:calc(50% + ${reportWatermarkOffsetX}px);width:480px;transform:translate(-50%,0);opacity:${reportWatermarkOpacity};pointer-events:none;z-index:0;" />
       <div style="position:relative;z-index:1;">
       <!-- Letterhead: logo left, school details centered, second logo right -->
       <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:6px;">
@@ -6413,12 +6536,100 @@ function ScaleEditor({ table, scale, loading, reload, labelPlaceholder, defaultL
 // SETTINGS: Branding — upload school logo (used everywhere) and an optional
 // custom receipt design (used as the background for generated receipts)
 // ============================================================================
+// Dummy data used only to render the live watermark previews in Settings —
+// never saved or sent anywhere.
+const SAMPLE_RECEIPT_PAYMENT = {
+  id: 'sample1234', paid_at: new Date().toISOString(), amount: 15000, method: 'M-Pesa', reference_no: 'QK7X9ABC12', note: '',
+}
+const SAMPLE_RECEIPT_STUDENT = { full_name: 'Jane Sample Wanjiru', admission_no: 'PWA/2024/017' }
+const SAMPLE_RECEIPT_INVOICES = [{ amount: 45000 }]
+const SAMPLE_RECEIPT_PAYMENTS = [{ amount: 15000 }]
+const SAMPLE_REPORT = {
+  exam: { name: 'End of Term Exam', term: 'Term 2', year: new Date().getFullYear(), term_resumes_on: null },
+  isCbc: false,
+  student: { full_name: 'Jane Sample Wanjiru', admission_no: 'PWA/2024/017', cohort: 'Form 3' },
+  subjectRows: [
+    { name: 'Mathematics', prevGrade: 'B', grade: 'B+', remark: 'Good improvement', is_compulsory: true },
+    { name: 'English', prevGrade: 'B+', grade: 'B+', remark: 'Consistent', is_compulsory: true },
+  ],
+  aggregate: { total: 62, maxTotal: 84 },
+  position: 5, outOf: 42,
+  prevAggregate: { total: 58, maxTotal: 84 },
+  prevPosition: 8, prevOutOf: 42,
+  timeline: [],
+  principalComment: 'Keep up the good work.',
+  classTeacherComment: 'A pleasure to teach.',
+}
+
 function BrandingSettings() {
   const { notify } = useNotify()
-  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, reload } = useSchoolSettings()
+  const {
+    logoUrl, secondaryLogoUrl, receiptTemplateUrl,
+    receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
+    reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
+    reload,
+  } = useSchoolSettings()
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [uploadingSecondaryLogo, setUploadingSecondaryLogo] = useState(false)
   const [uploadingReceipt, setUploadingReceipt] = useState(false)
+
+  // Local, editable copies for the design sliders below — kept separate from
+  // the saved context values so moving a slider previews live without
+  // writing to the database until "Save Design" is clicked.
+  const [receiptOpacity, setReceiptOpacity] = useState(receiptWatermarkOpacity)
+  const [receiptOffsetX, setReceiptOffsetX] = useState(receiptWatermarkOffsetX)
+  const [receiptOffsetY, setReceiptOffsetY] = useState(receiptWatermarkOffsetY)
+  const [reportOpacity, setReportOpacity] = useState(reportWatermarkOpacity)
+  const [reportOffsetX, setReportOffsetX] = useState(reportWatermarkOffsetX)
+  const [reportOffsetY, setReportOffsetY] = useState(reportWatermarkOffsetY)
+  const [savingDesign, setSavingDesign] = useState(false)
+
+  useEffect(() => {
+    setReceiptOpacity(receiptWatermarkOpacity)
+    setReceiptOffsetX(receiptWatermarkOffsetX)
+    setReceiptOffsetY(receiptWatermarkOffsetY)
+    setReportOpacity(reportWatermarkOpacity)
+    setReportOffsetX(reportWatermarkOffsetX)
+    setReportOffsetY(reportWatermarkOffsetY)
+  }, [receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY, reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY])
+
+  const designDirty = (
+    receiptOpacity !== receiptWatermarkOpacity || receiptOffsetX !== receiptWatermarkOffsetX || receiptOffsetY !== receiptWatermarkOffsetY ||
+    reportOpacity !== reportWatermarkOpacity || reportOffsetX !== reportWatermarkOffsetX || reportOffsetY !== reportWatermarkOffsetY
+  )
+
+  async function saveDesignSettings() {
+    setSavingDesign(true)
+    await ensureSettingsRow()
+    const { error } = await supabase.from('school_settings').update({
+      receipt_watermark_opacity: receiptOpacity,
+      receipt_watermark_offset_x: receiptOffsetX,
+      receipt_watermark_offset_y: receiptOffsetY,
+      report_watermark_opacity: reportOpacity,
+      report_watermark_offset_x: reportOffsetX,
+      report_watermark_offset_y: reportOffsetY,
+    }).eq('id', 1)
+    setSavingDesign(false)
+    if (error) { notify(`Couldn't save design settings: ${error.message}`, 'error'); return }
+    notify('Design settings saved.')
+    reload()
+  }
+
+  function resetDesignSettings() {
+    setReceiptOpacity(DEFAULT_RECEIPT_WATERMARK_OPACITY)
+    setReceiptOffsetX(0)
+    setReceiptOffsetY(0)
+    setReportOpacity(DEFAULT_REPORT_WATERMARK_OPACITY)
+    setReportOffsetX(0)
+    setReportOffsetY(0)
+  }
+
+  const previewReceiptCellHtml = buildReceiptCellHtml({
+    payment: SAMPLE_RECEIPT_PAYMENT, student: SAMPLE_RECEIPT_STUDENT,
+    invoices: SAMPLE_RECEIPT_INVOICES, payments: SAMPLE_RECEIPT_PAYMENTS,
+    meta: { logoUrl, secondaryLogoUrl, receiptTemplateUrl: null, receiptWatermarkOpacity: receiptOpacity, receiptWatermarkOffsetX: receiptOffsetX, receiptWatermarkOffsetY: receiptOffsetY },
+  })
+  const previewReportHtml = buildReportHtml(SAMPLE_REPORT, { opacity: reportOpacity, offsetX: reportOffsetX, offsetY: reportOffsetY })
 
   async function ensureSettingsRow() {
     // The row (id=1) may not exist yet on a fresh install — create it once.
@@ -6512,6 +6723,64 @@ function BrandingSettings() {
         {receiptTemplateUrl && (
           <button onClick={() => clearField('receipt_template_url')} style={{ ...secondaryBtn, color: COLORS.warn }}>Remove (Use Default)</button>
         )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, margin: '28px 0' }} />
+
+      <div style={sectionLabel}>Receipt &amp; report card watermark design</div>
+      <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 16 }}>
+        Controls the faint background school-logo watermark on the built-in receipt design (used by non-teaching
+        staff / Bursar) and on student report cards (KCSE &amp; CBC). The watermark sits behind the payment details
+        so it reads as a genuine background rather than being hidden behind them. Adjust opacity and how far it
+        sits from center (left/right and up/down), then check the live preview below before saving. This does not
+        affect a custom uploaded receipt design (above), which has no watermark.
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24, marginBottom: 16 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Receipt watermark</div>
+          <label style={fieldLabel}>Opacity — {Math.round(receiptOpacity * 100)}%
+            <input type="range" min={0} max={0.4} step={0.01} value={receiptOpacity}
+              onChange={(e) => setReceiptOpacity(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Horizontal position — {receiptOffsetX > 0 ? `${receiptOffsetX}px right` : receiptOffsetX < 0 ? `${Math.abs(receiptOffsetX)}px left` : 'centered'}
+            <input type="range" min={-150} max={150} step={5} value={receiptOffsetX}
+              onChange={(e) => setReceiptOffsetX(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Vertical position — {receiptOffsetY > 0 ? `${receiptOffsetY}px down` : receiptOffsetY < 0 ? `${Math.abs(receiptOffsetY)}px up` : 'centered'}
+            <input type="range" min={-100} max={100} step={5} value={receiptOffsetY}
+              onChange={(e) => setReceiptOffsetY(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <div style={{ marginTop: 12, width: 260, height: 367, overflow: 'hidden', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
+            <div style={{ width: 260, height: 367 }} dangerouslySetInnerHTML={{ __html: previewReceiptCellHtml }} />
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Report card watermark</div>
+          <label style={fieldLabel}>Opacity — {Math.round(reportOpacity * 100)}%
+            <input type="range" min={0} max={0.4} step={0.01} value={reportOpacity}
+              onChange={(e) => setReportOpacity(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Horizontal position — {reportOffsetX > 0 ? `${reportOffsetX}px right` : reportOffsetX < 0 ? `${Math.abs(reportOffsetX)}px left` : 'centered'}
+            <input type="range" min={-150} max={150} step={5} value={reportOffsetX}
+              onChange={(e) => setReportOffsetX(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Vertical position — {reportOffsetY > 0 ? `${reportOffsetY}px down` : reportOffsetY < 0 ? `${Math.abs(reportOffsetY)}px up` : 'default'}
+            <input type="range" min={-200} max={200} step={10} value={reportOffsetY}
+              onChange={(e) => setReportOffsetY(Number(e.target.value))} style={{ width: '100%' }} />
+          </label>
+          <div style={{ marginTop: 12, width: 260, height: 240, overflow: 'auto', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
+            <div style={{ width: 780, transform: 'scale(0.333)', transformOrigin: 'top left' }} dangerouslySetInnerHTML={{ __html: previewReportHtml }} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button onClick={saveDesignSettings} disabled={savingDesign || !designDirty} style={btn}>
+          {savingDesign ? 'Saving...' : 'Save Design Settings'}
+        </button>
+        <button onClick={resetDesignSettings} style={secondaryBtn}>Reset to Defaults</button>
       </div>
     </div>
   )

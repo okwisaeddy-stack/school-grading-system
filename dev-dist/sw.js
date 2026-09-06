@@ -67,7 +67,7 @@ if (!self.define) {
     });
   };
 }
-define(['./workbox-edf91e0a'], (function (workbox) { 'use strict';
+define(['./workbox-d9b455f7'], (function (workbox) { 'use strict';
 
   self.skipWaiting();
   workbox.clientsClaim();
@@ -81,7 +81,7 @@ define(['./workbox-edf91e0a'], (function (workbox) { 'use strict';
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
     "url": "/index.html",
-    "revision": "0.hfebmb8jcqk"
+    "revision": "0.oj4673om658"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("/index.html"), {
@@ -89,7 +89,10 @@ define(['./workbox-edf91e0a'], (function (workbox) { 'use strict';
   }));
   workbox.registerRoute(({
     url
-  }) => url.hostname.endsWith(".supabase.co") && url.pathname.startsWith("/rest/v1/"), new workbox.NetworkFirst({
+  }) => url.hostname.endsWith(".supabase.co") && url.pathname.startsWith("/rest/v1/profiles"), new workbox.NetworkOnly(), 'GET');
+  workbox.registerRoute(({
+    url
+  }) => url.hostname.endsWith(".supabase.co") && url.pathname.startsWith("/rest/v1/") && !url.pathname.startsWith("/rest/v1/profiles"), new workbox.NetworkFirst({
     "cacheName": "supabase-data-cache",
     "networkTimeoutSeconds": 5,
     plugins: [new workbox.CacheableResponsePlugin({
