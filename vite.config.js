@@ -30,14 +30,31 @@ export default defineConfig({
         navigateFallback: '/index.html',
         runtimeCaching: [
           {
-            // Supabase table reads AND rpc calls (compute_cohort_rankings
-            // etc.) both live under /rest/v1/, so one rule covers both.
-            // NetworkFirst = use live data when online, fall back to the
-            // last-seen response when offline. Only GET requests are
-            // intercepted by default, so marks/report saves (POST/PATCH)
-            // are never silently "faked" while offline.
+            // Profile/role lookups must always be live — never served from
+            // cache, even briefly. A stale cached response here can put
+            // someone in the wrong part of the app (e.g. showing a Bursar
+            // their old role) until the next successful network fetch
+            // overwrites it, which is a correctness problem, not just a
+            // freshness one. NetworkOnly = always hit the network; if it's
+            // offline, the request just fails (the app already shows a
+            // loading/blank state in that case) rather than silently
+            // returning outdated identity data.
             urlPattern: ({ url }) =>
-              url.hostname.endsWith('.supabase.co') && url.pathname.startsWith('/rest/v1/'),
+              url.hostname.endsWith('.supabase.co') && url.pathname.startsWith('/rest/v1/profiles'),
+            handler: 'NetworkOnly',
+          },
+          {
+            // Everything else under /rest/v1/ (marks, students, exams,
+            // rpc calls like compute_cohort_rankings, etc.) is fine to
+            // briefly serve from cache when offline or on a slow network —
+            // NetworkFirst = use live data when online, fall back to the
+            // last-seen response only if the network doesn't respond within
+            // networkTimeoutSeconds. Only GET requests are intercepted by
+            // default, so marks/report saves (POST/PATCH) are never
+            // silently "faked" while offline.
+            urlPattern: ({ url }) =>
+              url.hostname.endsWith('.supabase.co') && url.pathname.startsWith('/rest/v1/') &&
+              !url.pathname.startsWith('/rest/v1/profiles'),
             handler: 'NetworkFirst',
             options: {
               cacheName: 'supabase-data-cache',
