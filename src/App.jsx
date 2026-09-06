@@ -215,15 +215,15 @@ const DEFAULT_RECEIPT_WATERMARK_OPACITY = 0.16
 const DEFAULT_REPORT_WATERMARK_OPACITY = 0.05
 const reportBrandingCache = {
   logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png',
-  watermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, watermarkOffsetX: 0, watermarkOffsetY: 0,
+  watermarkEnabled: true, watermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, watermarkOffsetX: 0, watermarkOffsetY: 0,
 }
 
 function useSchoolSettings() {
   const ctx = useContext(SchoolSettingsContext)
   return ctx || {
     logoUrl: '/crest.png', secondaryLogoUrl: '/crest.png', receiptTemplateUrl: null,
-    receiptWatermarkOpacity: DEFAULT_RECEIPT_WATERMARK_OPACITY, receiptWatermarkOffsetX: 0, receiptWatermarkOffsetY: 0,
-    reportWatermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, reportWatermarkOffsetX: 0, reportWatermarkOffsetY: 0,
+    receiptWatermarkEnabled: true, receiptWatermarkOpacity: DEFAULT_RECEIPT_WATERMARK_OPACITY, receiptWatermarkOffsetX: 0, receiptWatermarkOffsetY: 0,
+    reportWatermarkEnabled: true, reportWatermarkOpacity: DEFAULT_REPORT_WATERMARK_OPACITY, reportWatermarkOffsetX: 0, reportWatermarkOffsetY: 0,
     loading: false, reload: () => {},
   }
 }
@@ -232,9 +232,11 @@ function SchoolSettingsProvider({ children }) {
   const [logoUrl, setLogoUrl] = useState('/crest.png')
   const [secondaryLogoUrl, setSecondaryLogoUrl] = useState('/crest.png')
   const [receiptTemplateUrl, setReceiptTemplateUrl] = useState(null)
+  const [receiptWatermarkEnabled, setReceiptWatermarkEnabled] = useState(true)
   const [receiptWatermarkOpacity, setReceiptWatermarkOpacity] = useState(DEFAULT_RECEIPT_WATERMARK_OPACITY)
   const [receiptWatermarkOffsetX, setReceiptWatermarkOffsetX] = useState(0)
   const [receiptWatermarkOffsetY, setReceiptWatermarkOffsetY] = useState(0)
+  const [reportWatermarkEnabled, setReportWatermarkEnabled] = useState(true)
   const [reportWatermarkOpacity, setReportWatermarkOpacity] = useState(DEFAULT_REPORT_WATERMARK_OPACITY)
   const [reportWatermarkOffsetX, setReportWatermarkOffsetX] = useState(0)
   const [reportWatermarkOffsetY, setReportWatermarkOffsetY] = useState(0)
@@ -245,23 +247,28 @@ function SchoolSettingsProvider({ children }) {
     const { data } = await supabase.from('school_settings').select('*').eq('id', 1).single()
     const resolvedLogo = data?.logo_url || '/crest.png'
     const resolvedSecondary = data?.secondary_logo_url || '/crest.png'
+    const resolvedReceiptEnabled = data?.receipt_watermark_enabled ?? true
     const resolvedReceiptOpacity = data?.receipt_watermark_opacity ?? DEFAULT_RECEIPT_WATERMARK_OPACITY
     const resolvedReceiptOffsetX = data?.receipt_watermark_offset_x ?? 0
     const resolvedReceiptOffsetY = data?.receipt_watermark_offset_y ?? 0
+    const resolvedReportEnabled = data?.report_watermark_enabled ?? true
     const resolvedReportOpacity = data?.report_watermark_opacity ?? DEFAULT_REPORT_WATERMARK_OPACITY
     const resolvedReportOffsetX = data?.report_watermark_offset_x ?? 0
     const resolvedReportOffsetY = data?.report_watermark_offset_y ?? 0
     setLogoUrl(resolvedLogo)
     setSecondaryLogoUrl(resolvedSecondary)
     setReceiptTemplateUrl(data?.receipt_template_url || null)
+    setReceiptWatermarkEnabled(resolvedReceiptEnabled)
     setReceiptWatermarkOpacity(resolvedReceiptOpacity)
     setReceiptWatermarkOffsetX(resolvedReceiptOffsetX)
     setReceiptWatermarkOffsetY(resolvedReceiptOffsetY)
+    setReportWatermarkEnabled(resolvedReportEnabled)
     setReportWatermarkOpacity(resolvedReportOpacity)
     setReportWatermarkOffsetX(resolvedReportOffsetX)
     setReportWatermarkOffsetY(resolvedReportOffsetY)
     reportBrandingCache.logoUrl = resolvedLogo
     reportBrandingCache.secondaryLogoUrl = resolvedSecondary
+    reportBrandingCache.watermarkEnabled = resolvedReportEnabled
     reportBrandingCache.watermarkOpacity = resolvedReportOpacity
     reportBrandingCache.watermarkOffsetX = resolvedReportOffsetX
     reportBrandingCache.watermarkOffsetY = resolvedReportOffsetY
@@ -273,8 +280,8 @@ function SchoolSettingsProvider({ children }) {
   return (
     <SchoolSettingsContext.Provider value={{
       logoUrl, secondaryLogoUrl, receiptTemplateUrl,
-      receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
-      reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
+      receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
+      reportWatermarkEnabled, reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
       loading, reload,
     }}>
       {children}
@@ -645,13 +652,19 @@ function DashboardScreen({ onNavigate }) {
 
   async function loadCounts() {
     setLoading(true)
-    const [{ count: studentCount }, { count: pendingCount }, { count: examCount }, { count: teacherCount }] = await Promise.all([
+    const [{ count: studentCount }, { count: pendingCount }, { count: examCount }, { data: teacherRows }] = await Promise.all([
       supabase.from('students').select('*', { count: 'exact', head: true }),
       supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       supabase.from('exams').select('*', { count: 'exact', head: true }),
-      supabase.from('profiles').select('*', { count: 'exact', head: true }).in('role', ['teacher', 'admin']).eq('status', 'approved'),
+      // Fetched (not head-counted) so we can apply the same "actually
+      // teaching" rule used on the Profiles tab: exclude non-teaching admin
+      // titles (School Manager, Director) and untitled/system admin accounts.
+      supabase.from('profiles').select('role, title').in('role', ['teacher', 'admin']).eq('status', 'approved'),
     ])
-    setCounts({ students: studentCount ?? 0, pending: pendingCount ?? 0, exams: examCount ?? 0, teachers: teacherCount ?? 0 })
+    const teacherCount = (teacherRows || []).filter(
+      (p) => p.role === 'teacher' || (p.role === 'admin' && p.title && !NON_TEACHING_TITLES.includes(p.title))
+    ).length
+    setCounts({ students: studentCount ?? 0, pending: pendingCount ?? 0, exams: examCount ?? 0, teachers: teacherCount })
     setLoading(false)
   }
 
@@ -2946,7 +2959,7 @@ function FinanceStudentPicker({ selectedStudent, onSelect }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.from('students').select('id, full_name, admission_no, cohort').order('full_name')
+    supabase.from('students').select('id, full_name, admission_no, cohort, parent_name').order('full_name')
       .then(({ data }) => { setStudents(data || []); setLoading(false) })
   }, [])
 
@@ -3003,17 +3016,36 @@ function FinanceStudentPicker({ selectedStudent, onSelect }) {
 // receipt, or (if the school has uploaded one in Settings) their own receipt
 // design used as the page background with the payment details overlaid.
 // ============================================================================
-function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
+function buildReceiptCellHtml({ payment, student, invoices, payments, meta, size = 'compact' }) {
   const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
   const balance = totalInvoiced - totalPaid
   const paidDate = new Date(payment.paid_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 
+  // 'compact' is sized for a quarter of an A4 sheet (4-up printing / class
+  // batches); 'large' is sized for a single receipt filling most of a page.
+  const s = size === 'large'
+    ? {
+        cardPadding: '30px 34px', logoSize: 64, headerPad: '14px', headerMb: '20px', headerBorder: '3px',
+        nameFontSize: '22px', addressFontSize: '13px', titleFontSize: '17px', titleMb: '20px',
+        detailsPadding: '20px 24px', detailsFontSize: '15px', detailsLineHeight: '2.05',
+        footerFontSize: '13px', footerMt: '26px', footerRowMb: '22px', watermarkWidth: '55%',
+        cardRadius: '20px', detailsRadius: '12px',
+      }
+    : {
+        cardPadding: '12px 14px', logoSize: 30, headerPad: '6px', headerMb: '8px', headerBorder: '2px',
+        nameFontSize: '11.5px', addressFontSize: '8px', titleFontSize: '10.5px', titleMb: '8px',
+        detailsPadding: '8px 10px', detailsFontSize: '10px', detailsLineHeight: '1.65',
+        footerFontSize: '8px', footerMt: '10px', footerRowMb: '12px', watermarkWidth: '70%',
+        cardRadius: '12px', detailsRadius: '8px',
+      }
+
   const detailsBlock = `
-    <div style="font-size:10px;line-height:1.65;">
+    <div style="font-size:${s.detailsFontSize};line-height:${s.detailsLineHeight};">
       <div><strong>Receipt No:</strong> ${payment.id.slice(0, 8).toUpperCase()}</div>
       <div><strong>Date:</strong> ${paidDate}</div>
-      <div><strong>Received From:</strong> ${student.full_name} (${student.admission_no})</div>
+      <div><strong>Parent/Guardian:</strong> ${student.parent_name || '—'}</div>
+      <div><strong>Student:</strong> ${student.full_name} (${student.admission_no})</div>
       <div><strong>Amount:</strong> KES ${Number(payment.amount).toLocaleString()}</div>
       <div><strong>Method:</strong> ${payment.method}${payment.reference_no ? ` — Ref: ${payment.reference_no}` : ''}</div>
       ${payment.note ? `<div><strong>Note:</strong> ${payment.note}</div>` : ''}
@@ -3027,36 +3059,50 @@ function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
     return `
       <div style="position:relative;width:100%;height:100%;overflow:hidden;border-radius:10px;">
         <img src="${meta.receiptTemplateUrl}" style="width:100%;height:100%;object-fit:cover;display:block;" crossorigin="anonymous" />
-        <div style="position:absolute;left:8px;right:8px;bottom:8px;background:rgba(255,255,255,0.95);border-radius:6px;padding:8px 10px;font-family:sans-serif;color:#1E2A24;">
+        <div style="position:absolute;left:8px;right:8px;bottom:8px;background:rgba(255,255,255,0.95);border-radius:6px;padding:${s.detailsPadding};font-family:sans-serif;color:#1E2A24;">
           ${detailsBlock}
+          <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:${s.footerFontSize};color:#6B6558;">
+            <div>_______________<br/>School Manager</div>
+            <div>_______________<br/>Principal</div>
+          </div>
         </div>
       </div>
     `
   }
 
+  const receiptWatermarkEnabled = meta.receiptWatermarkEnabled !== false
   const receiptWatermarkOpacity = meta.receiptWatermarkOpacity ?? DEFAULT_RECEIPT_WATERMARK_OPACITY
   const receiptWatermarkOffsetX = meta.receiptWatermarkOffsetX ?? 0
   const receiptWatermarkOffsetY = meta.receiptWatermarkOffsetY ?? 0
+  const watermarkImg = receiptWatermarkEnabled
+    ? `<img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(50% + ${receiptWatermarkOffsetY}px);left:calc(50% + ${receiptWatermarkOffsetX}px);width:${s.watermarkWidth};transform:translate(-50%,-50%);opacity:${receiptWatermarkOpacity};filter:grayscale(1);pointer-events:none;z-index:0;" />`
+    : ''
 
   return `
-    <div style="position:relative;width:100%;height:100%;font-family:sans-serif;color:#1E2A24;border-radius:12px;border:1px solid #E4DFD1;overflow:hidden;background:#FFFFFF;box-sizing:border-box;">
-      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(50% + ${receiptWatermarkOffsetY}px);left:calc(50% + ${receiptWatermarkOffsetX}px);width:70%;transform:translate(-50%,-50%);opacity:${receiptWatermarkOpacity};filter:grayscale(1);pointer-events:none;z-index:0;" />
-      <div style="position:relative;z-index:1;padding:12px 14px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
-        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #2C3E37;padding-bottom:6px;margin-bottom:8px;">
-          <img src="${meta.logoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
+    <div style="position:relative;width:100%;height:100%;font-family:sans-serif;color:#1E2A24;border-radius:${s.cardRadius};border:1px solid #E4DFD1;overflow:hidden;background:#FFFFFF;box-sizing:border-box;">
+      ${watermarkImg}
+      <div style="position:relative;z-index:1;padding:${s.cardPadding};height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:${s.headerBorder} solid #2C3E37;padding-bottom:${s.headerPad};margin-bottom:${s.headerMb};">
+          <img src="${meta.logoUrl}" crossorigin="anonymous" style="width:${s.logoSize}px;height:${s.logoSize}px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
           <div style="flex:1;text-align:center;padding:0 6px;">
-            <div style="font-size:11.5px;font-weight:800;color:#2C3E37;line-height:1.15;">Paul Wanjigi Alpine High School</div>
-            <div style="font-size:8px;color:#6B6558;">P.O. BOX 1801-20117 NAIVASHA</div>
+            <div style="font-size:${s.nameFontSize};font-weight:800;color:#2C3E37;line-height:1.15;">Paul Wanjigi Alpine High School</div>
+            <div style="font-size:${s.addressFontSize};color:#6B6558;">P.O. BOX 1801-20117 NAIVASHA</div>
           </div>
-          <img src="${meta.secondaryLogoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
+          <img src="${meta.secondaryLogoUrl}" crossorigin="anonymous" style="width:${s.logoSize}px;height:${s.logoSize}px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
         </div>
-        <div style="text-align:center;font-size:10.5px;font-weight:700;letter-spacing:0.6px;color:#2C3E37;margin-bottom:8px;">OFFICIAL RECEIPT</div>
-        <div style="background:rgba(247,245,239,0.88);border:1px solid #E4DFD1;border-radius:8px;padding:8px 10px;flex:1;">
+        <div style="text-align:center;font-size:${s.titleFontSize};font-weight:700;letter-spacing:0.6px;color:#2C3E37;margin-bottom:${s.titleMb};">OFFICIAL RECEIPT</div>
+        <div style="background:rgba(247,245,239,0.88);border:1px solid #E4DFD1;border-radius:${s.detailsRadius};padding:${s.detailsPadding};flex:1;">
           ${detailsBlock}
         </div>
-        <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:8.5px;color:#6B6558;">
-          <div>_______________<br/>Received By</div>
-          <div>_______________<br/>Stamp</div>
+        <div style="margin-top:${s.footerMt};font-size:${s.footerFontSize};color:#6B6558;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:${s.footerRowMb};">
+            <div>_______________<br/>Received By</div>
+            <div>_______________<br/>Stamp</div>
+          </div>
+          <div style="display:flex;justify-content:space-between;">
+            <div>_______________<br/>School Manager</div>
+            <div>_______________<br/>Principal</div>
+          </div>
         </div>
       </div>
     </div>
@@ -3086,9 +3132,20 @@ function buildReceiptSheetHtml(cells) {
   `
 }
 
-// Backward-compatible helper: same receipt 4-up (the single-payment download).
+// Backward-compatible helper: same receipt 4-up (kept for reference / class sheets).
 function buildReceiptPageHtml(cellHtml) {
   return buildReceiptSheetHtml([cellHtml, cellHtml, cellHtml, cellHtml])
+}
+
+// Single-receipt download: one receipt, centered and enlarged (at its
+// original proportions) to fill the page — not the 4-up sheet used for
+// class-wide printing. Pass a cellHtml built with size:'large'.
+function buildSingleReceiptPageHtml(cellHtml) {
+  return `
+    <div style="width:780px;height:1100px;box-sizing:border-box;background:#fff;display:flex;align-items:center;justify-content:center;">
+      <div style="width:600px;height:840px;">${cellHtml}</div>
+    </div>
+  `
 }
 
 // Renders one or more full-page sheet HTML strings into a single multi-page PDF.
@@ -3121,8 +3178,8 @@ async function receiptToPdfBlob(pageHtml) {
 }
 
 async function downloadReceipt({ payment, student, invoices, payments, meta }) {
-  const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta })
-  const pageHtml = buildReceiptPageHtml(cellHtml)
+  const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta, size: 'large' })
+  const pageHtml = buildSingleReceiptPageHtml(cellHtml)
   const blob = await receiptToPdfBlob(pageHtml)
   const fileName = `Receipt_${student.admission_no}_${new Date(payment.paid_at).toISOString().slice(0, 10)}.pdf`
   const url = URL.createObjectURL(blob)
@@ -3135,7 +3192,7 @@ async function downloadReceipt({ payment, student, invoices, payments, meta }) {
 
 function FeesScreen({ profile }) {
   const { notify } = useNotify()
-  const { logoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
+  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
   const [student, setStudent] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [payments, setPayments] = useState([])
@@ -3224,9 +3281,9 @@ function FeesScreen({ profile }) {
   function handlePreviewReceipt(payment) {
     setReceiptLoadingId(payment.id)
     try {
-      const meta = { logoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY }
-      const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta })
-      const pageHtml = buildReceiptPageHtml(cellHtml)
+      const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY, receiptWatermarkEnabled }
+      const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta, size: 'large' })
+      const pageHtml = buildSingleReceiptPageHtml(cellHtml)
       setPreviewReceipt({ pageHtml, payment })
     } catch (err) {
       notify(`Couldn't build receipt preview: ${err.message}`, 'error')
@@ -3374,14 +3431,21 @@ function FeesScreen({ profile }) {
         )
       )}
 
-      {previewReceipt && (
-        <div style={modalOverlay}>
-          <div style={{ ...modalCard, maxWidth: 420 }}>
-            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Receipt Preview</h3>
-            <div style={{ width: 330, height: 465, overflow: 'hidden', margin: '0 auto 16px', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
-              <div style={{ width: 780, height: 1100, transform: 'scale(0.423)', transformOrigin: 'top left' }} dangerouslySetInnerHTML={{ __html: previewReceipt.pageHtml }} />
+      {previewReceipt && (() => {
+        const previewScale = Math.min((window.innerWidth * 0.94) / 780, (window.innerHeight * 0.72) / 1100)
+        return (
+        <div style={{ ...modalOverlay, alignItems: 'stretch', justifyContent: 'stretch', padding: 0 }}>
+          <div style={{ ...modalCard, width: '100vw', height: '100vh', maxWidth: 'none', maxHeight: 'none', margin: 0, borderRadius: 0, display: 'flex', flexDirection: 'column', padding: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 18px', borderBottom: `1px solid ${COLORS.ruleLight}` }}>
+              <h3 style={{ fontSize: 15, margin: 0 }}>Receipt Preview</h3>
+              <button onClick={() => setPreviewReceipt(null)} style={{ ...secondaryBtn, padding: '4px 12px' }} disabled={downloadingReceipt}>✕ Close</button>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', padding: 16 }}>
+              <div style={{ width: 780 * previewScale, height: 1100 * previewScale, flexShrink: 0 }}>
+                <div style={{ width: 780, height: 1100, transform: `scale(${previewScale})`, transformOrigin: 'top left' }} dangerouslySetInnerHTML={{ __html: previewReceipt.pageHtml }} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, padding: '14px 18px', borderTop: `1px solid ${COLORS.ruleLight}` }}>
               <button onClick={() => setPreviewReceipt(null)} style={secondaryBtn} disabled={downloadingReceipt}>Cancel</button>
               <button onClick={confirmDownloadReceipt} style={btn} disabled={downloadingReceipt}>
                 {downloadingReceipt ? 'Preparing PDF...' : '⬇ Download Receipt'}
@@ -3389,7 +3453,8 @@ function FeesScreen({ profile }) {
             </div>
           </div>
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
@@ -3408,7 +3473,7 @@ function FeesScreen({ profile }) {
 // ============================================================================
 function ClassReceiptsScreen({ profile }) {
   const { notify } = useNotify()
-  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
+  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY } = useSchoolSettings()
   const [cohort, setCohort] = useState(CLASS_OPTIONS[0].value)
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState([]) // { student, invoices, payments, unreceiptedPayments, balance }
@@ -3424,7 +3489,7 @@ function ClassReceiptsScreen({ profile }) {
   async function loadClass() {
     setLoading(true)
     setPreviewSheets(null)
-    const { data: students } = await supabase.from('students').select('id, full_name, admission_no, cohort').eq('cohort', cohort).order('full_name')
+    const { data: students } = await supabase.from('students').select('id, full_name, admission_no, cohort, parent_name').eq('cohort', cohort).order('full_name')
     const studentIds = (students || []).map((s) => s.id)
     const [{ data: allInvoices }, { data: allPayments }] = await Promise.all([
       studentIds.length ? supabase.from('fee_invoices').select('*').in('student_id', studentIds) : Promise.resolve({ data: [] }),
@@ -3460,7 +3525,7 @@ function ClassReceiptsScreen({ profile }) {
     const list = selectedPaymentsList()
     if (list.length === 0) { notify('No students selected — nothing to generate.', 'error'); return }
     setGenerating(true)
-    const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY }
+    const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl, receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY }
     const cells = list.map(({ row, payment }) =>
       buildReceiptCellHtml({ payment, student: row.student, invoices: row.invoices, payments: row.payments, meta })
     )
@@ -3965,6 +4030,7 @@ function buildProgressGraphSvg(timeline) {
 }
 
 function buildReportHtml(report, watermarkOverride) {
+  const reportWatermarkEnabled = (watermarkOverride?.enabled ?? reportBrandingCache.watermarkEnabled) !== false
   const reportWatermarkOpacity = watermarkOverride?.opacity ?? reportBrandingCache.watermarkOpacity ?? DEFAULT_REPORT_WATERMARK_OPACITY
   const reportWatermarkOffsetX = watermarkOverride?.offsetX ?? reportBrandingCache.watermarkOffsetX ?? 0
   const reportWatermarkOffsetY = watermarkOverride?.offsetY ?? reportBrandingCache.watermarkOffsetY ?? 0
@@ -3997,7 +4063,7 @@ function buildReportHtml(report, watermarkOverride) {
 
   return `
     <div style="position:relative;max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
-      <img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(280px + ${reportWatermarkOffsetY}px);left:calc(50% + ${reportWatermarkOffsetX}px);width:480px;transform:translate(-50%,0);opacity:${reportWatermarkOpacity};pointer-events:none;z-index:0;" />
+      ${reportWatermarkEnabled ? `<img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(280px + ${reportWatermarkOffsetY}px);left:calc(50% + ${reportWatermarkOffsetX}px);width:480px;transform:translate(-50%,0);opacity:${reportWatermarkOpacity};pointer-events:none;z-index:0;" />` : ''}
       <div style="position:relative;z-index:1;">
       <!-- Letterhead: logo left, school details centered, second logo right -->
       <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:6px;">
@@ -4748,11 +4814,12 @@ async function loadTeachers() {
       .eq('status', 'approved')
       .order('full_name')
 
-    // Teachers always show; admins only show if they hold a real leadership
-    // title (Dean/Principal/Deputy/School Manager/Director). Untitled/system
-    // admin accounts (e.g. a personal monitoring login) stay hidden here.
+    // Teachers always show; admins only show if they hold a real teaching
+    // leadership title (Dean/Principal/Deputy). Non-teaching admin titles
+    // (School Manager, Director) and untitled/system admin accounts (e.g. a
+    // personal monitoring login) stay hidden here.
     const teacherProfiles = (allApproved || []).filter(
-      (p) => p.role === 'teacher' || (p.role === 'admin' && p.title)
+      (p) => p.role === 'teacher' || (p.role === 'admin' && p.title && !NON_TEACHING_TITLES.includes(p.title))
     )
 
     const teacherIds = (teacherProfiles || []).map((t) => t.id)
@@ -6541,7 +6608,7 @@ function ScaleEditor({ table, scale, loading, reload, labelPlaceholder, defaultL
 const SAMPLE_RECEIPT_PAYMENT = {
   id: 'sample1234', paid_at: new Date().toISOString(), amount: 15000, method: 'M-Pesa', reference_no: 'QK7X9ABC12', note: '',
 }
-const SAMPLE_RECEIPT_STUDENT = { full_name: 'Jane Sample Wanjiru', admission_no: 'PWA/2024/017' }
+const SAMPLE_RECEIPT_STUDENT = { full_name: 'Jane Sample Wanjiru', admission_no: 'PWA/2024/017', parent_name: 'Mary Wanjiru' }
 const SAMPLE_RECEIPT_INVOICES = [{ amount: 45000 }]
 const SAMPLE_RECEIPT_PAYMENTS = [{ amount: 15000 }]
 const SAMPLE_REPORT = {
@@ -6565,46 +6632,52 @@ function BrandingSettings() {
   const { notify } = useNotify()
   const {
     logoUrl, secondaryLogoUrl, receiptTemplateUrl,
-    receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
-    reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
+    receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY,
+    reportWatermarkEnabled, reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY,
     reload,
   } = useSchoolSettings()
   const [uploadingLogo, setUploadingLogo] = useState(false)
   const [uploadingSecondaryLogo, setUploadingSecondaryLogo] = useState(false)
   const [uploadingReceipt, setUploadingReceipt] = useState(false)
 
-  // Local, editable copies for the design sliders below — kept separate from
-  // the saved context values so moving a slider previews live without
-  // writing to the database until "Save Design" is clicked.
+  // Local, editable copies for the design controls below — kept separate
+  // from the saved context values so toggling/moving a control previews
+  // live without writing to the database until "Save Design" is clicked.
+  const [receiptEnabled, setReceiptEnabled] = useState(receiptWatermarkEnabled)
   const [receiptOpacity, setReceiptOpacity] = useState(receiptWatermarkOpacity)
   const [receiptOffsetX, setReceiptOffsetX] = useState(receiptWatermarkOffsetX)
   const [receiptOffsetY, setReceiptOffsetY] = useState(receiptWatermarkOffsetY)
+  const [reportEnabled, setReportEnabled] = useState(reportWatermarkEnabled)
   const [reportOpacity, setReportOpacity] = useState(reportWatermarkOpacity)
   const [reportOffsetX, setReportOffsetX] = useState(reportWatermarkOffsetX)
   const [reportOffsetY, setReportOffsetY] = useState(reportWatermarkOffsetY)
   const [savingDesign, setSavingDesign] = useState(false)
 
   useEffect(() => {
+    setReceiptEnabled(receiptWatermarkEnabled)
     setReceiptOpacity(receiptWatermarkOpacity)
     setReceiptOffsetX(receiptWatermarkOffsetX)
     setReceiptOffsetY(receiptWatermarkOffsetY)
+    setReportEnabled(reportWatermarkEnabled)
     setReportOpacity(reportWatermarkOpacity)
     setReportOffsetX(reportWatermarkOffsetX)
     setReportOffsetY(reportWatermarkOffsetY)
-  }, [receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY, reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY])
+  }, [receiptWatermarkEnabled, receiptWatermarkOpacity, receiptWatermarkOffsetX, receiptWatermarkOffsetY, reportWatermarkEnabled, reportWatermarkOpacity, reportWatermarkOffsetX, reportWatermarkOffsetY])
 
   const designDirty = (
-    receiptOpacity !== receiptWatermarkOpacity || receiptOffsetX !== receiptWatermarkOffsetX || receiptOffsetY !== receiptWatermarkOffsetY ||
-    reportOpacity !== reportWatermarkOpacity || reportOffsetX !== reportWatermarkOffsetX || reportOffsetY !== reportWatermarkOffsetY
+    receiptEnabled !== receiptWatermarkEnabled || receiptOpacity !== receiptWatermarkOpacity || receiptOffsetX !== receiptWatermarkOffsetX || receiptOffsetY !== receiptWatermarkOffsetY ||
+    reportEnabled !== reportWatermarkEnabled || reportOpacity !== reportWatermarkOpacity || reportOffsetX !== reportWatermarkOffsetX || reportOffsetY !== reportWatermarkOffsetY
   )
 
   async function saveDesignSettings() {
     setSavingDesign(true)
     await ensureSettingsRow()
     const { error } = await supabase.from('school_settings').update({
+      receipt_watermark_enabled: receiptEnabled,
       receipt_watermark_opacity: receiptOpacity,
       receipt_watermark_offset_x: receiptOffsetX,
       receipt_watermark_offset_y: receiptOffsetY,
+      report_watermark_enabled: reportEnabled,
       report_watermark_opacity: reportOpacity,
       report_watermark_offset_x: reportOffsetX,
       report_watermark_offset_y: reportOffsetY,
@@ -6616,9 +6689,11 @@ function BrandingSettings() {
   }
 
   function resetDesignSettings() {
+    setReceiptEnabled(true)
     setReceiptOpacity(DEFAULT_RECEIPT_WATERMARK_OPACITY)
     setReceiptOffsetX(0)
     setReceiptOffsetY(0)
+    setReportEnabled(true)
     setReportOpacity(DEFAULT_REPORT_WATERMARK_OPACITY)
     setReportOffsetX(0)
     setReportOffsetY(0)
@@ -6627,9 +6702,9 @@ function BrandingSettings() {
   const previewReceiptCellHtml = buildReceiptCellHtml({
     payment: SAMPLE_RECEIPT_PAYMENT, student: SAMPLE_RECEIPT_STUDENT,
     invoices: SAMPLE_RECEIPT_INVOICES, payments: SAMPLE_RECEIPT_PAYMENTS,
-    meta: { logoUrl, secondaryLogoUrl, receiptTemplateUrl: null, receiptWatermarkOpacity: receiptOpacity, receiptWatermarkOffsetX: receiptOffsetX, receiptWatermarkOffsetY: receiptOffsetY },
+    meta: { logoUrl, secondaryLogoUrl, receiptTemplateUrl: null, receiptWatermarkEnabled: receiptEnabled, receiptWatermarkOpacity: receiptOpacity, receiptWatermarkOffsetX: receiptOffsetX, receiptWatermarkOffsetY: receiptOffsetY },
   })
-  const previewReportHtml = buildReportHtml(SAMPLE_REPORT, { opacity: reportOpacity, offsetX: reportOffsetX, offsetY: reportOffsetY })
+  const previewReportHtml = buildReportHtml(SAMPLE_REPORT, { enabled: reportEnabled, opacity: reportOpacity, offsetX: reportOffsetX, offsetY: reportOffsetY })
 
   async function ensureSettingsRow() {
     // The row (id=1) may not exist yet on a fresh install — create it once.
@@ -6731,24 +6806,31 @@ function BrandingSettings() {
       <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 16 }}>
         Controls the faint background school-logo watermark on the built-in receipt design (used by non-teaching
         staff / Bursar) and on student report cards (KCSE &amp; CBC). The watermark sits behind the payment details
-        so it reads as a genuine background rather than being hidden behind them. Adjust opacity and how far it
-        sits from center (left/right and up/down), then check the live preview below before saving. This does not
-        affect a custom uploaded receipt design (above), which has no watermark.
+        so it reads as a genuine background rather than being hidden behind them. Tick "Remove watermark" to turn
+        it off entirely, or adjust opacity and how far it sits from center (left/right and up/down) — check the
+        live preview below before saving. This does not affect a custom uploaded receipt design (above), which has
+        no watermark.
       </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24, marginBottom: 16 }}>
         <div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Receipt watermark</div>
-          <label style={fieldLabel}>Opacity — {Math.round(receiptOpacity * 100)}%
-            <input type="range" min={0} max={0.4} step={0.01} value={receiptOpacity}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Receipt watermark</div>
+            <label style={{ fontSize: 12, color: COLORS.muted, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!receiptEnabled} onChange={(e) => setReceiptEnabled(!e.target.checked)} />
+              Remove watermark
+            </label>
+          </div>
+          <label style={{ ...fieldLabel, opacity: receiptEnabled ? 1 : 0.4 }}>Opacity — {Math.round(receiptOpacity * 100)}%
+            <input type="range" min={0} max={0.4} step={0.01} value={receiptOpacity} disabled={!receiptEnabled}
               onChange={(e) => setReceiptOpacity(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
-          <label style={{ ...fieldLabel, marginTop: 10 }}>Horizontal position — {receiptOffsetX > 0 ? `${receiptOffsetX}px right` : receiptOffsetX < 0 ? `${Math.abs(receiptOffsetX)}px left` : 'centered'}
-            <input type="range" min={-150} max={150} step={5} value={receiptOffsetX}
+          <label style={{ ...fieldLabel, marginTop: 10, opacity: receiptEnabled ? 1 : 0.4 }}>Horizontal position — {receiptOffsetX > 0 ? `${receiptOffsetX}px right` : receiptOffsetX < 0 ? `${Math.abs(receiptOffsetX)}px left` : 'centered'}
+            <input type="range" min={-150} max={150} step={5} value={receiptOffsetX} disabled={!receiptEnabled}
               onChange={(e) => setReceiptOffsetX(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
-          <label style={{ ...fieldLabel, marginTop: 10 }}>Vertical position — {receiptOffsetY > 0 ? `${receiptOffsetY}px down` : receiptOffsetY < 0 ? `${Math.abs(receiptOffsetY)}px up` : 'centered'}
-            <input type="range" min={-100} max={100} step={5} value={receiptOffsetY}
+          <label style={{ ...fieldLabel, marginTop: 10, opacity: receiptEnabled ? 1 : 0.4 }}>Vertical position — {receiptOffsetY > 0 ? `${receiptOffsetY}px down` : receiptOffsetY < 0 ? `${Math.abs(receiptOffsetY)}px up` : 'centered'}
+            <input type="range" min={-100} max={100} step={5} value={receiptOffsetY} disabled={!receiptEnabled}
               onChange={(e) => setReceiptOffsetY(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
           <div style={{ marginTop: 12, width: 260, height: 367, overflow: 'hidden', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
@@ -6757,17 +6839,23 @@ function BrandingSettings() {
         </div>
 
         <div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Report card watermark</div>
-          <label style={fieldLabel}>Opacity — {Math.round(reportOpacity * 100)}%
-            <input type="range" min={0} max={0.4} step={0.01} value={reportOpacity}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Report card watermark</div>
+            <label style={{ fontSize: 12, color: COLORS.muted, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!reportEnabled} onChange={(e) => setReportEnabled(!e.target.checked)} />
+              Remove watermark
+            </label>
+          </div>
+          <label style={{ ...fieldLabel, opacity: reportEnabled ? 1 : 0.4 }}>Opacity — {Math.round(reportOpacity * 100)}%
+            <input type="range" min={0} max={0.4} step={0.01} value={reportOpacity} disabled={!reportEnabled}
               onChange={(e) => setReportOpacity(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
-          <label style={{ ...fieldLabel, marginTop: 10 }}>Horizontal position — {reportOffsetX > 0 ? `${reportOffsetX}px right` : reportOffsetX < 0 ? `${Math.abs(reportOffsetX)}px left` : 'centered'}
-            <input type="range" min={-150} max={150} step={5} value={reportOffsetX}
+          <label style={{ ...fieldLabel, marginTop: 10, opacity: reportEnabled ? 1 : 0.4 }}>Horizontal position — {reportOffsetX > 0 ? `${reportOffsetX}px right` : reportOffsetX < 0 ? `${Math.abs(reportOffsetX)}px left` : 'centered'}
+            <input type="range" min={-150} max={150} step={5} value={reportOffsetX} disabled={!reportEnabled}
               onChange={(e) => setReportOffsetX(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
-          <label style={{ ...fieldLabel, marginTop: 10 }}>Vertical position — {reportOffsetY > 0 ? `${reportOffsetY}px down` : reportOffsetY < 0 ? `${Math.abs(reportOffsetY)}px up` : 'default'}
-            <input type="range" min={-200} max={200} step={10} value={reportOffsetY}
+          <label style={{ ...fieldLabel, marginTop: 10, opacity: reportEnabled ? 1 : 0.4 }}>Vertical position — {reportOffsetY > 0 ? `${reportOffsetY}px down` : reportOffsetY < 0 ? `${Math.abs(reportOffsetY)}px up` : 'default'}
+            <input type="range" min={-200} max={200} step={10} value={reportOffsetY} disabled={!reportEnabled}
               onChange={(e) => setReportOffsetY(Number(e.target.value))} style={{ width: '100%' }} />
           </label>
           <div style={{ marginTop: 12, width: 260, height: 240, overflow: 'auto', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
