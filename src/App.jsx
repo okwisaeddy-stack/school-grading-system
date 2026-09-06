@@ -289,6 +289,10 @@ const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies':
 // Titles that count as "Leadership" — these admins can enter/edit marks for
 // any subject and class directly, without self-assigning a teacher row first.
 const LEADERSHIP_TITLES = Object.keys(TITLE_LIMITS)
+// Non-teaching-staff (finance) accounts and their approval requests are
+// financial/administrative matters — only these titles should see them.
+// Dean of Studies is academic-focused and deliberately excluded.
+const FINANCE_VISIBLE_TITLES = ['Principal', 'Deputy Principal', 'School Manager', 'Director']
 // Of those, School Manager and Director are purely administrative — they
 // don't teach a subject/class, so the Profiles screen shouldn't offer to
 // assign them one.
@@ -364,7 +368,7 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
         <label style={fieldLabel}>Your role
           <select value={roleChoice} onChange={(e) => setRoleChoice(e.target.value)} style={input}>
             <option value="teacher">Subject Teacher</option>
-            <option value="finance">Bursar / Accounts (Fees & Pocket Money)</option>
+            <option value="finance">Non-Teaching Staff (Fees & Pocket Money)</option>
             {Object.keys(TITLE_LIMITS).map((title) => (
               <option key={title} value={title} disabled={isTitleFull(title)}>
                 {title}{isTitleFull(title) ? ' (taken)' : ''}
@@ -379,7 +383,7 @@ function Signup({ onSwitchToLogin, onSignedUp }) {
         )}
         {roleChoice === 'finance' && (
           <p style={{ fontSize: 11.5, color: COLORS.accent, marginTop: -4, marginBottom: 10 }}>
-            Bursar accounts can only see school fees, pocket money, and a basic student list — no marks, timetable, or other admin access.
+            Non-teaching staff accounts can only see school fees, pocket money, and a basic student list — no marks, timetable, or other admin access.
           </p>
         )}
         {error && <p style={errorText}>{error}</p>}
@@ -634,7 +638,7 @@ function DashboardScreen({ onNavigate }) {
 // ============================================================================
 // APPROVALS
 // ============================================================================
-function ApprovalsScreen({ currentUserId }) {
+function ApprovalsScreen({ currentUserId, viewerTitle }) {
   const { notify } = useNotify()
   const [pending, setPending] = useState([])
   const [loading, setLoading] = useState(true)
@@ -642,6 +646,7 @@ function ApprovalsScreen({ currentUserId }) {
   const [pendingAssignments, setPendingAssignments] = useState([])
   const [loadingAssignments, setLoadingAssignments] = useState(true)
   const [actioningAssignmentId, setActioningAssignmentId] = useState(null)
+  const canSeeFinance = FINANCE_VISIBLE_TITLES.includes(viewerTitle)
 
   useEffect(() => { loadPending(); loadPendingAssignments() }, [])
 
@@ -653,6 +658,8 @@ function ApprovalsScreen({ currentUserId }) {
     if (!error) setPending(data)
     setLoading(false)
   }
+
+  const visiblePending = canSeeFinance ? pending : pending.filter((p) => p.role !== 'finance')
 
   async function loadPendingAssignments() {
     setLoadingAssignments(true)
@@ -715,7 +722,7 @@ function ApprovalsScreen({ currentUserId }) {
       <h2>Pending Approvals</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>Confirm each name is actually on staff before approving — leadership requests grant full admin access.</p>
 
-      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : pending.length === 0 ? (
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : visiblePending.length === 0 ? (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 24, textAlign: 'center', color: COLORS.muted, fontSize: 13 }}>
           No pending sign-ups right now.
         </div>
@@ -724,7 +731,7 @@ function ApprovalsScreen({ currentUserId }) {
           <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
             <thead><tr><th style={th}>Full Name</th><th style={th}>Username</th><th style={th}>Requested Role</th><th style={th}>Signed up</th><th style={th}></th></tr></thead>
             <tbody>
-              {pending.map((p) => (
+              {visiblePending.map((p) => (
                 <tr key={p.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                   <td style={td}>{p.full_name}</td>
                   <td style={{ ...td, color: COLORS.muted }}>{p.username}</td>
@@ -732,7 +739,7 @@ function ApprovalsScreen({ currentUserId }) {
                     {p.role === 'admin' ? (
                       <span style={{ color: COLORS.accent, fontWeight: 700 }}>{p.title || 'Admin'}</span>
                     ) : p.role === 'finance' ? (
-                      <span style={{ color: COLORS.accent, fontWeight: 700 }}>Bursar / Accounts</span>
+                      <span style={{ color: COLORS.accent, fontWeight: 700 }}>Non-Teaching Staff</span>
                     ) : (
                       'Subject Teacher'
                     )}
@@ -2498,19 +2505,8 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
     setLoading(true)
     const assignment = currentAssignment()
     if (!assignment) { setLoading(false); return }
-    // Uses an RPC (get_class_students, SECURITY DEFINER) instead of a direct
-    // `students` select. The RLS policy on `students` was silently returning
-    // zero rows for every non-admin teacher (root cause never fully isolated
-    // in Postgres policy internals), so the authorization check — admin, or
-    // an approved teacher with a matching teacher_assignments row — is done
-    // once inside the function itself, sidestepping the broken policy.
-    const { data: classStudents, error: classStudentsError } = await supabase
-      .rpc('get_class_students', { p_class_label: assignment.class_label, p_subject_id: assignment.subject_id })
-    if (classStudentsError) {
-      notify(`Couldn't load students: ${classStudentsError.message}`, 'error')
-      setLoading(false)
-      return
-    }
+    const { data: classStudents } = await supabase
+      .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
     const classStudentIds = (classStudents || []).map((s) => s.id)
     const { data: allEnrollmentRows } = await supabase
       .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
@@ -2970,32 +2966,31 @@ function FinanceStudentPicker({ selectedStudent, onSelect }) {
 // receipt, or (if the school has uploaded one in Settings) their own receipt
 // design used as the page background with the payment details overlaid.
 // ============================================================================
-function buildReceiptHtml({ payment, student, invoices, payments, meta }) {
+function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
   const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
   const balance = totalInvoiced - totalPaid
   const paidDate = new Date(payment.paid_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 
   const detailsBlock = `
-    <div style="font-size:13px;line-height:1.9;">
+    <div style="font-size:10px;line-height:1.65;">
       <div><strong>Receipt No:</strong> ${payment.id.slice(0, 8).toUpperCase()}</div>
       <div><strong>Date:</strong> ${paidDate}</div>
       <div><strong>Received From:</strong> ${student.full_name} (${student.admission_no})</div>
       <div><strong>Amount:</strong> KES ${Number(payment.amount).toLocaleString()}</div>
-      <div><strong>Payment Method:</strong> ${payment.method}${payment.reference_no ? ` — Ref: ${payment.reference_no}` : ''}</div>
+      <div><strong>Method:</strong> ${payment.method}${payment.reference_no ? ` — Ref: ${payment.reference_no}` : ''}</div>
       ${payment.note ? `<div><strong>Note:</strong> ${payment.note}</div>` : ''}
-      <div><strong>Balance After Payment:</strong> KES ${balance.toLocaleString()}</div>
+      <div><strong>Balance:</strong> KES ${balance.toLocaleString()}</div>
     </div>
   `
 
   if (meta.receiptTemplateUrl) {
-    // Custom uploaded design used as the full-page background; details are
-    // overlaid in a readable box near the bottom. Works best when the
-    // uploaded design leaves blank space there for this box.
+    // Custom uploaded design used as the cell background; details overlaid
+    // in a readable box near the bottom.
     return `
-      <div style="position:relative;width:800px;">
-        <img src="${meta.receiptTemplateUrl}" style="width:800px;display:block;" crossorigin="anonymous" />
-        <div style="position:absolute;left:40px;right:40px;bottom:40px;background:rgba(255,255,255,0.94);border:1px solid #ccc;border-radius:6px;padding:14px 18px;font-family:sans-serif;color:#1E2A24;">
+      <div style="position:relative;width:100%;height:100%;overflow:hidden;border-radius:10px;">
+        <img src="${meta.receiptTemplateUrl}" style="width:100%;height:100%;object-fit:cover;display:block;" crossorigin="anonymous" />
+        <div style="position:absolute;left:8px;right:8px;bottom:8px;background:rgba(255,255,255,0.95);border-radius:6px;padding:8px 10px;font-family:sans-serif;color:#1E2A24;">
           ${detailsBlock}
         </div>
       </div>
@@ -3003,53 +2998,71 @@ function buildReceiptHtml({ payment, student, invoices, payments, meta }) {
   }
 
   return `
-    <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
-      <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:18px;">
-        <div style="display:flex;align-items:center;gap:16px;">
-          <img src="${meta.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
-          <div style="flex:1;">
-            <div style="font-size:22px;font-weight:800;color:#2C3E37;">Paul Wanjigi Alpine High School</div>
-            <div style="font-size:11px;color:#6B6558;margin-top:2px;">P.O. BOX 1801-20117 NAIVASHA &nbsp;·&nbsp; www.pwahigh.com</div>
+    <div style="position:relative;width:100%;height:100%;font-family:sans-serif;color:#1E2A24;border-radius:12px;border:1px solid #E4DFD1;overflow:hidden;background:#FFFFFF;box-sizing:border-box;">
+      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:50%;left:50%;width:70%;transform:translate(-50%,-50%);opacity:0.06;pointer-events:none;" />
+      <div style="position:relative;padding:12px 14px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #2C3E37;padding-bottom:6px;margin-bottom:8px;">
+          <img src="${meta.logoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
+          <div style="flex:1;text-align:center;padding:0 6px;">
+            <div style="font-size:11.5px;font-weight:800;color:#2C3E37;line-height:1.15;">Paul Wanjigi Alpine High School</div>
+            <div style="font-size:8px;color:#6B6558;">P.O. BOX 1801-20117 NAIVASHA</div>
           </div>
+          <img src="${meta.secondaryLogoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
         </div>
-      </div>
-      <div style="text-align:center;font-size:16px;font-weight:700;letter-spacing:1px;margin-bottom:18px;color:#2C3E37;">OFFICIAL RECEIPT</div>
-      <div style="background:#F7F5EF;border:1px solid #E4DFD1;border-radius:8px;padding:18px 22px;margin-bottom:24px;">
-        ${detailsBlock}
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:60px;font-size:12px;color:#6B6558;">
-        <div>_____________________<br/>Received By</div>
-        <div>_____________________<br/>Official Stamp</div>
+        <div style="text-align:center;font-size:10.5px;font-weight:700;letter-spacing:0.6px;color:#2C3E37;margin-bottom:8px;">OFFICIAL RECEIPT</div>
+        <div style="background:#F7F5EF;border:1px solid #E4DFD1;border-radius:8px;padding:8px 10px;flex:1;">
+          ${detailsBlock}
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:8.5px;color:#6B6558;">
+          <div>_______________<br/>Received By</div>
+          <div>_______________<br/>Stamp</div>
+        </div>
       </div>
     </div>
   `
 }
 
-async function receiptToPdfBlob(receiptHtml) {
+// Tiles the same receipt 4-up on one A4 sheet (2x2, with dashed cut-guides)
+// — matches the duplicate/triplicate paper receipt books schools already use,
+// so a single "Receipt" click gives you enough copies to file, hand to the
+// parent, and keep for accounts, cut apart along the dashed lines.
+function buildReceiptPageHtml(cellHtml) {
+  const cellStyle = 'position:relative;'
+  return `
+    <div style="width:780px;height:1100px;box-sizing:border-box;background:#fff;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;">
+      <div style="${cellStyle}padding:14px 10px 10px 14px;border-right:1px dashed #C9C2AE;border-bottom:1px dashed #C9C2AE;">${cellHtml}</div>
+      <div style="${cellStyle}padding:14px 14px 10px 10px;border-bottom:1px dashed #C9C2AE;">${cellHtml}</div>
+      <div style="${cellStyle}padding:10px 10px 14px 14px;border-right:1px dashed #C9C2AE;">${cellHtml}</div>
+      <div style="${cellStyle}padding:10px 14px 14px 10px;">${cellHtml}</div>
+    </div>
+  `
+}
+
+async function receiptToPdfBlob(pageHtml) {
   const container = document.createElement('div')
   container.style.position = 'fixed'
   container.style.left = '-9999px'
   container.style.top = '0'
-  container.style.width = '800px'
+  container.style.width = '780px'
   container.style.background = '#fff'
-  container.style.padding = '24px'
   container.style.fontFamily = 'sans-serif'
-  container.innerHTML = receiptHtml
+  container.innerHTML = pageHtml
   document.body.appendChild(container)
-  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800, width: 800, useCORS: true })
+  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 780, width: 780, useCORS: true })
   document.body.removeChild(container)
   const imgData = canvas.toDataURL('image/png')
   const pdf = new jsPDF('p', 'mm', 'a4')
   const pageWidth = pdf.internal.pageSize.getWidth()
-  const imgWidth = pageWidth - 20
-  const imgHeight = (canvas.height * imgWidth) / canvas.width
-  pdf.addImage(imgData, 'PNG', 10, 10, imgWidth, imgHeight)
+  const pageHeight = pdf.internal.pageSize.getHeight()
+  const imgHeight = Math.min((canvas.height * pageWidth) / canvas.width, pageHeight)
+  pdf.addImage(imgData, 'PNG', 0, 0, pageWidth, imgHeight)
   return pdf.output('blob')
 }
 
 async function downloadReceipt({ payment, student, invoices, payments, meta }) {
-  const html = buildReceiptHtml({ payment, student, invoices, payments, meta })
-  const blob = await receiptToPdfBlob(html)
+  const cellHtml = buildReceiptCellHtml({ payment, student, invoices, payments, meta })
+  const pageHtml = buildReceiptPageHtml(cellHtml)
+  const blob = await receiptToPdfBlob(pageHtml)
   const fileName = `Receipt_${student.admission_no}_${new Date(payment.paid_at).toISOString().slice(0, 10)}.pdf`
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -3059,158 +3072,14 @@ async function downloadReceipt({ payment, student, invoices, payments, meta }) {
   URL.revokeObjectURL(url)
 }
 
-// ============================================================================
-// FINANCE: batch receipt download — one zip of every payment's receipt for
-// every student in a class. Reuses the same buildReceiptHtml/receiptToPdfBlob
-// used for one-off receipts, so a batch receipt looks identical to a single one.
-// ============================================================================
-async function downloadClassReceiptsAsZip(classLabel, meta, onProgress) {
-  const { data: classStudents, error: studentsError } = await supabase
-    .rpc('get_class_students', { p_class_label: classLabel, p_subject_id: null })
-  if (studentsError) throw new Error(studentsError.message)
-  const students = classStudents || []
-  if (students.length === 0) throw new Error('No students found in this class.')
-
-  const studentIds = students.map((s) => s.id)
-  const [{ data: allInvoices, error: invError }, { data: allPayments, error: payError }] = await Promise.all([
-    supabase.from('fee_invoices').select('*').in('student_id', studentIds),
-    supabase.from('fee_payments').select('*').in('student_id', studentIds).order('paid_at', { ascending: false }),
-  ])
-  if (invError) throw new Error(invError.message)
-  if (payError) throw new Error(payError.message)
-
-  const zip = new JSZip()
-  let done = 0
-  const payments = allPayments || []
-  for (const student of students) {
-    const studentInvoices = (allInvoices || []).filter((i) => i.student_id === student.id)
-    const studentPayments = payments.filter((p) => p.student_id === student.id)
-    for (const payment of studentPayments) {
-      const html = buildReceiptHtml({ payment, student, invoices: studentInvoices, payments: studentPayments, meta })
-      const blob = await receiptToPdfBlob(html)
-      const fileName = `${student.admission_no}_${student.full_name.replace(/\s+/g, '_')}_${new Date(payment.paid_at).toISOString().slice(0, 10)}_${payment.id.slice(0, 6)}.pdf`
-      zip.file(fileName, blob)
-    }
-    done++
-    onProgress?.(done, students.length)
-  }
-  const zipBlob = await zip.generateAsync({ type: 'blob' })
-  const url = URL.createObjectURL(zipBlob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `receipts_${classLabel}_${new Date().toISOString().slice(0, 10)}.zip`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-// ============================================================================
-// FINANCE: modal to set/update School Fees for every student in a class at
-// once, for a chosen term/year. Same upsert-by-term logic as the single-
-// student "Set Amount" action, just looped across the whole class.
-// ============================================================================
-function SetClassFeesModal({ profile, onClose, onDone }) {
-  const { notify } = useNotify()
-  const [classLabel, setClassLabel] = useState(CLASS_OPTIONS[0]?.value || '')
-  const [term, setTerm] = useState('Term 1')
-  const [year, setYear] = useState(new Date().getFullYear())
-  const [amount, setAmount] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [progress, setProgress] = useState(null) // { done, total }
-
-  async function handleSave() {
-    if (!amount) { notify('Enter the amount due.', 'error'); return }
-    setSaving(true)
-    setProgress(null)
-    try {
-      const { data: classStudents, error: studentsError } = await supabase
-        .rpc('get_class_students', { p_class_label: classLabel, p_subject_id: null })
-      if (studentsError) throw new Error(studentsError.message)
-      const students = classStudents || []
-      if (students.length === 0) throw new Error('No students found in this class.')
-
-      const studentIds = students.map((s) => s.id)
-      const { data: existingInvoices, error: invError } = await supabase
-        .from('fee_invoices').select('*')
-        .in('student_id', studentIds).eq('term', term).eq('year', Number(year)).eq('item_name', 'School Fees')
-      if (invError) throw new Error(invError.message)
-      const existingByStudent = {}
-      ;(existingInvoices || []).forEach((i) => { existingByStudent[i.student_id] = i })
-
-      let done = 0
-      for (const student of students) {
-        const existing = existingByStudent[student.id]
-        const { error } = existing
-          ? await supabase.from('fee_invoices').update({ amount: Number(amount) }).eq('id', existing.id)
-          : await supabase.from('fee_invoices').insert({
-              student_id: student.id, term, year: Number(year), item_name: 'School Fees',
-              amount: Number(amount), created_by: profile.id,
-            })
-        if (error) throw new Error(`${student.full_name}: ${error.message}`)
-        done++
-        setProgress({ done, total: students.length })
-      }
-      notify(`Set ${term} ${year} fees to ${Number(amount).toLocaleString()} for ${students.length} student${students.length === 1 ? '' : 's'}.`)
-      onDone()
-    } catch (err) {
-      notify(`Couldn't set fees for the class: ${err.message}`, 'error')
-    }
-    setSaving(false)
-  }
-
-  return (
-    <div style={modalOverlay}>
-      <div style={{ ...modalCard, maxWidth: 420 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3>Set School Fees — Whole Class</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
-        </div>
-        <p style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 14 }}>
-          Sets (or updates) the amount due for every student in this class for the chosen term. Students who already have an amount set for that term get it updated, not duplicated.
-        </p>
-        <label style={fieldLabel}>Class
-          <select value={classLabel} onChange={(e) => setClassLabel(e.target.value)} style={input}>
-            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-          </select>
-        </label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <label style={{ ...fieldLabel, flex: 1 }}>Term
-            <select value={term} onChange={(e) => setTerm(e.target.value)} style={input}>
-              <option>Term 1</option><option>Term 2</option><option>Term 3</option>
-            </select>
-          </label>
-          <label style={{ ...fieldLabel, width: 100 }}>Year
-            <input type="number" value={year} onChange={(e) => setYear(e.target.value)} style={input} />
-          </label>
-        </div>
-        <label style={fieldLabel}>Amount Due (applies to everyone in the class)
-          <input type="number" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} style={input} />
-        </label>
-        {progress && (
-          <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 8 }}>
-            Saving {progress.done} / {progress.total}...
-          </p>
-        )}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
-          <button onClick={onClose} style={secondaryBtn} disabled={saving}>Cancel</button>
-          <button onClick={handleSave} disabled={!classLabel || !amount || saving} style={btn}>
-            {saving ? 'Saving...' : 'Set for Whole Class'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function FeesScreen({ profile }) {
-  const { notify, confirmAction } = useNotify()
+  const { notify } = useNotify()
   const { logoUrl, receiptTemplateUrl } = useSchoolSettings()
   const [student, setStudent] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [payments, setPayments] = useState([])
   const [loading, setLoading] = useState(false)
   const [receiptLoadingId, setReceiptLoadingId] = useState(null)
-  const [deletingInvoiceId, setDeletingInvoiceId] = useState(null)
-  const [deletingPaymentId, setDeletingPaymentId] = useState(null)
 
   const [invTerm, setInvTerm] = useState('Term 1')
   const [invYear, setInvYear] = useState(new Date().getFullYear())
@@ -3222,11 +3091,6 @@ function FeesScreen({ profile }) {
   const [payRef, setPayRef] = useState('')
   const [payNote, setPayNote] = useState('')
   const [savingPayment, setSavingPayment] = useState(false)
-
-  const [showSetClassFees, setShowSetClassFees] = useState(false)
-  const [batchClassLabel, setBatchClassLabel] = useState(CLASS_OPTIONS[0]?.value || '')
-  const [batchDownloading, setBatchDownloading] = useState(false)
-  const [batchProgress, setBatchProgress] = useState(null) // { done, total }
 
   useEffect(() => { if (student) loadLedger() }, [student])
 
@@ -3287,81 +3151,15 @@ function FeesScreen({ profile }) {
     setReceiptLoadingId(null)
   }
 
-  // Deletes are permanent (no soft-delete/status flag), consistent with how
-  // deletes work everywhere else in the app.
-  async function handleDeleteInvoice(invoice) {
-    const ok = await confirmAction(
-      `Permanently delete the ${invoice.term} ${invoice.year} fee amount (${Number(invoice.amount).toLocaleString()}) for ${student.full_name}? This cannot be undone.`,
-      { danger: true, confirmLabel: 'Delete' }
-    )
-    if (!ok) return
-    setDeletingInvoiceId(invoice.id)
-    const { error } = await supabase.from('fee_invoices').delete().eq('id', invoice.id)
-    setDeletingInvoiceId(null)
-    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
-    notify('Fee amount entry deleted.')
-    loadLedger()
-  }
-
-  async function handleDeletePayment(payment) {
-    const ok = await confirmAction(
-      `Permanently delete this payment of ${Number(payment.amount).toLocaleString()} (${payment.method}) for ${student.full_name}? This cannot be undone.`,
-      { danger: true, confirmLabel: 'Delete' }
-    )
-    if (!ok) return
-    setDeletingPaymentId(payment.id)
-    const { error } = await supabase.from('fee_payments').delete().eq('id', payment.id)
-    setDeletingPaymentId(null)
-    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
-    notify('Payment entry deleted.')
-    loadLedger()
-  }
-
-  async function handleBatchDownloadReceipts() {
-    setBatchDownloading(true)
-    setBatchProgress(null)
-    try {
-      await downloadClassReceiptsAsZip(
-        batchClassLabel,
-        { logoUrl, receiptTemplateUrl },
-        (done, total) => setBatchProgress({ done, total })
-      )
-    } catch (err) {
-      notify(`Couldn't generate batch receipts: ${err.message}`, 'error')
-    }
-    setBatchDownloading(false)
-    setBatchProgress(null)
-  }
-
   const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
   const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
   const balance = totalInvoiced - totalPaid
 
   return (
-    <div style={pageWrap}>
+    <div style={{ ...pageWrap, maxWidth: 'none', width: '100%' }}>
       <h2>School Fees</h2>
-
-      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14, marginBottom: 20 }}>
-        <h3 style={{ fontSize: 14, marginBottom: 4 }}>Whole-Class Actions</h3>
-        <p style={{ color: COLORS.muted, fontSize: 12, marginBottom: 10 }}>Set fees or pull receipts for every student in a class at once.</p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button onClick={() => setShowSetClassFees(true)} style={btn}>Set School Fees — Whole Class</button>
-          <select value={batchClassLabel} onChange={(e) => setBatchClassLabel(e.target.value)} style={{ ...input, width: 140, marginBottom: 0 }}>
-            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-          </select>
-          <button onClick={handleBatchDownloadReceipts} disabled={batchDownloading} style={secondaryBtn}>
-            {batchDownloading
-              ? (batchProgress ? `Generating ${batchProgress.done}/${batchProgress.total}...` : 'Generating...')
-              : 'Download All Receipts (Class)'}
-          </button>
-        </div>
-      </div>
-
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>Search for a student to view or update their fee ledger.</p>
       <FinanceStudentPicker selectedStudent={student} onSelect={setStudent} />
-      {showSetClassFees && (
-        <SetClassFeesModal profile={profile} onClose={() => setShowSetClassFees(false)} onDone={() => setShowSetClassFees(false)} />
-      )}
 
       {student && (
         loading ? <p style={{ color: COLORS.muted }}>Loading ledger...</p> : (
@@ -3397,24 +3195,15 @@ function FeesScreen({ profile }) {
                 </div>
                 <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th><th style={th}></th></tr></thead>
+                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th></tr></thead>
                     <tbody>
                       {invoices.map((i) => (
                         <tr key={i.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                           <td style={td}>{i.term} {i.year}</td>
                           <td style={{ ...td, textAlign: 'right' }}>{Number(i.amount).toLocaleString()}</td>
-                          <td style={td}>
-                            <button
-                              onClick={() => handleDeleteInvoice(i)}
-                              disabled={deletingInvoiceId === i.id}
-                              style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn }}
-                            >
-                              {deletingInvoiceId === i.id ? '...' : 'Delete'}
-                            </button>
-                          </td>
                         </tr>
                       ))}
-                      {invoices.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
+                      {invoices.length === 0 && <tr><td colSpan={2} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -3442,22 +3231,13 @@ function FeesScreen({ profile }) {
                           <td style={{ ...td, textAlign: 'right' }}>{Number(p.amount).toLocaleString()}</td>
                           <td style={{ ...td, color: COLORS.muted }}>{p.note || '—'}</td>
                           <td style={td}>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button
-                                onClick={() => handleDownloadReceipt(p)}
-                                disabled={receiptLoadingId === p.id}
-                                style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
-                              >
-                                {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
-                              </button>
-                              <button
-                                onClick={() => handleDeletePayment(p)}
-                                disabled={deletingPaymentId === p.id}
-                                style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn }}
-                              >
-                                {deletingPaymentId === p.id ? '...' : 'Delete'}
-                              </button>
-                            </div>
+                            <button
+                              onClick={() => handleDownloadReceipt(p)}
+                              disabled={receiptLoadingId === p.id}
+                              style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5 }}
+                            >
+                              {receiptLoadingId === p.id ? 'Generating...' : 'Receipt'}
+                            </button>
                           </td>
                         </tr>
                       ))}
@@ -3512,6 +3292,14 @@ function PocketMoneyScreen({ profile }) {
     loadTransactions()
   }
 
+  async function deleteTransaction(id) {
+    if (!window.confirm('Delete this transaction? This cannot be undone.')) return
+    const { error } = await supabase.from('pocket_money_transactions').delete().eq('id', id)
+    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
+    notify('Transaction deleted.')
+    loadTransactions()
+  }
+
   const balance = transactions.reduce((sum, t) => sum + (t.type === 'deposit' ? Number(t.amount) : -Number(t.amount)), 0)
 
   return (
@@ -3540,7 +3328,7 @@ function PocketMoneyScreen({ profile }) {
 
             <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                <thead><tr><th style={th}>Date</th><th style={th}>Type</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th></tr></thead>
+                <thead><tr><th style={th}>Date</th><th style={th}>Type</th><th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={th}>Note</th><th style={th}></th></tr></thead>
                 <tbody>
                   {transactions.map((t) => (
                     <tr key={t.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
@@ -3550,9 +3338,12 @@ function PocketMoneyScreen({ profile }) {
                       </td>
                       <td style={{ ...td, textAlign: 'right' }}>{Number(t.amount).toLocaleString()}</td>
                       <td style={{ ...td, color: COLORS.muted }}>{t.note || '—'}</td>
+                      <td style={td}>
+                        <button onClick={() => deleteTransaction(t.id)} style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn, borderColor: COLORS.warn }}>Delete</button>
+                      </td>
                     </tr>
                   ))}
-                  {transactions.length === 0 && <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No transactions yet.</td></tr>}
+                  {transactions.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No transactions yet.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -3851,35 +3642,37 @@ function buildReportHtml(report) {
   const gradeOrLevelWord = report.isCbc ? 'Level' : 'Grade'
 
   return `
-    <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
+    <div style="position:relative;max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;">
+      <img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:280px;left:50%;width:480px;transform:translate(-50%,0);opacity:0.05;pointer-events:none;z-index:0;" />
+      <div style="position:relative;z-index:1;">
       <!-- Letterhead: logo left, school details centered, second logo right -->
       <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:6px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-          <img src="${reportBrandingCache.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
+          <img src="${reportBrandingCache.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.15);" crossorigin="anonymous" />
           <div style="flex:1;text-align:center;">
             <div style="font-size:24px;font-weight:800;color:#2C3E37;line-height:1.15;">Paul Wanjigi Alpine High School</div>
             <div style="font-size:11.5px;color:#6B6558;margin-top:2px;">P.O. BOX 1801-20117 NAIVASHA &nbsp;·&nbsp; www.pwahigh.com</div>
             <div style="font-size:11.5px;color:#9C6B2E;font-weight:700;margin-top:2px;">Mission: To graduate leaders with integrity</div>
           </div>
-          <img src="${reportBrandingCache.secondaryLogoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;" crossorigin="anonymous" />
+          <img src="${reportBrandingCache.secondaryLogoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.15);" crossorigin="anonymous" />
         </div>
       </div>
 
       <!-- Title bar -->
-      <div style="display:flex;justify-content:space-between;align-items:center;background:#2C3E37;color:#F4F1E8;padding:8px 16px;margin-bottom:18px;font-size:12.5px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;background:#2C3E37;color:#F4F1E8;padding:9px 16px;margin-bottom:18px;font-size:12.5px;border-radius:8px;">
         <div><strong>${report.exam.name}</strong> &nbsp;·&nbsp; ${report.exam.term} ${report.exam.year}</div>
         <div>Issue Date: ${new Date().toLocaleDateString('en-GB')}</div>
       </div>
 
       <!-- Student info -->
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;background:#F7F5EF;border:1px solid #E4DFD1;padding:12px 16px;margin-bottom:18px;font-size:13px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;background:#F7F5EF;border:1px solid #E4DFD1;padding:12px 16px;margin-bottom:18px;font-size:13px;border-radius:10px;">
         <div><span style="color:#6B6558;font-size:11px;">Student</span><br/><strong>${report.student.full_name}</strong></div>
         <div><span style="color:#6B6558;font-size:11px;">Adm. No.</span><br/><strong>${report.student.admission_no}</strong></div>
         <div><span style="color:#6B6558;font-size:11px;">${report.student.cohort === 'grade_10' ? 'Grade' : 'Form'}</span><br/><strong>${report.student.cohort}</strong></div>
       </div>
 
       <!-- Subject table -->
-      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:4px;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:4px;border-radius:10px;overflow:hidden;">
         <thead>
           <tr style="background:#2C3E37;color:#F4F1E8;">
             <th style="text-align:left;padding:8px 10px;">Subject</th>
@@ -3892,7 +3685,7 @@ function buildReportHtml(report) {
       </table>
 
       <!-- Summary: This Term vs Last Term -->
-      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:18px;">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:18px;border-radius:10px;overflow:hidden;">
         <thead>
           <tr style="background:#2C3E37;color:#F4F1E8;">
             <th style="text-align:left;padding:7px 10px;"></th>
@@ -3918,7 +3711,7 @@ function buildReportHtml(report) {
       <!-- Progress graph -->
       <div style="margin-bottom:18px;">
         <div style="font-size:10.5px;letter-spacing:1px;color:#6B6558;text-transform:uppercase;margin-bottom:4px;">Progress</div>
-        <div style="border:1px solid #E4DFD1;padding:6px 4px 0;">
+        <div style="border:1px solid #E4DFD1;padding:6px 4px 0;border-radius:10px;">
           ${buildProgressGraphSvg(report.timeline)}
         </div>
       </div>
@@ -3953,6 +3746,7 @@ function buildReportHtml(report) {
       <!-- Term resumes -->
       <div style="margin-top:16px;font-size:12.5px;font-weight:700;color:#2C3E37;">
         The Term Resumes on: ${report.exam.term_resumes_on ? new Date(report.exam.term_resumes_on).toLocaleDateString('en-GB') : '— (not yet set by admin)'}
+      </div>
       </div>
     </div>
   `
@@ -6623,7 +6417,7 @@ function AppContent() {
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
             {tab === 'Enrollment' && LEADERSHIP_TITLES.includes(profile.title) && <BulkEnrollmentScreen />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
-            {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} />}
+            {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} viewerTitle={profile.title} />}
             {tab === 'Settings' && <SettingsScreen />}
           </div>
         </div>
