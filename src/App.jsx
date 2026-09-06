@@ -2999,7 +2999,7 @@ function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
 
   return `
     <div style="position:relative;width:100%;height:100%;font-family:sans-serif;color:#1E2A24;border-radius:12px;border:1px solid #E4DFD1;overflow:hidden;background:#FFFFFF;box-sizing:border-box;">
-      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:50%;left:50%;width:70%;transform:translate(-50%,-50%);opacity:0.06;pointer-events:none;" />
+      <img src="${meta.logoUrl}" crossorigin="anonymous" style="position:absolute;top:50%;left:50%;width:70%;transform:translate(-50%,-50%);opacity:0.16;filter:grayscale(1);pointer-events:none;" />
       <div style="position:relative;padding:12px 14px;height:100%;box-sizing:border-box;display:flex;flex-direction:column;">
         <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #2C3E37;padding-bottom:6px;margin-bottom:8px;">
           <img src="${meta.logoUrl}" crossorigin="anonymous" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;" />
@@ -3022,41 +3022,61 @@ function buildReceiptCellHtml({ payment, student, invoices, payments, meta }) {
   `
 }
 
-// Tiles the same receipt 4-up on one A4 sheet (2x2, with dashed cut-guides)
-// — matches the duplicate/triplicate paper receipt books schools already use,
-// so a single "Receipt" click gives you enough copies to file, hand to the
-// parent, and keep for accounts, cut apart along the dashed lines.
-function buildReceiptPageHtml(cellHtml) {
+// Tiles up to 4 receipt cells on one A4 sheet (2x2, with dashed cut-guides).
+// `cells` is an array of up to 4 cellHtml strings — pass the SAME cellHtml
+// 4 times to get 4 copies of one receipt (matches the duplicate/triplicate
+// paper receipt books schools already use), or 4 DIFFERENT students' cellHtml
+// to fit 4 different people's receipts on one printed sheet (used for
+// whole-class batches, so you're not burning a full sheet per student).
+// Fewer than 4 cells leaves the remaining slots blank.
+function buildReceiptSheetHtml(cells) {
   const cellStyle = 'position:relative;'
+  const slots = [cells[0] || '', cells[1] || '', cells[2] || '', cells[3] || '']
+  const paddings = [
+    'padding:14px 10px 10px 14px;border-right:1px dashed #C9C2AE;border-bottom:1px dashed #C9C2AE;',
+    'padding:14px 14px 10px 10px;border-bottom:1px dashed #C9C2AE;',
+    'padding:10px 10px 14px 14px;border-right:1px dashed #C9C2AE;',
+    'padding:10px 14px 14px 10px;',
+  ]
   return `
     <div style="width:780px;height:1100px;box-sizing:border-box;background:#fff;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;">
-      <div style="${cellStyle}padding:14px 10px 10px 14px;border-right:1px dashed #C9C2AE;border-bottom:1px dashed #C9C2AE;">${cellHtml}</div>
-      <div style="${cellStyle}padding:14px 14px 10px 10px;border-bottom:1px dashed #C9C2AE;">${cellHtml}</div>
-      <div style="${cellStyle}padding:10px 10px 14px 14px;border-right:1px dashed #C9C2AE;">${cellHtml}</div>
-      <div style="${cellStyle}padding:10px 14px 14px 10px;">${cellHtml}</div>
+      ${slots.map((cellHtml, i) => `<div style="${cellStyle}${paddings[i]}">${cellHtml}</div>`).join('')}
     </div>
   `
 }
 
-async function receiptToPdfBlob(pageHtml) {
-  const container = document.createElement('div')
-  container.style.position = 'fixed'
-  container.style.left = '-9999px'
-  container.style.top = '0'
-  container.style.width = '780px'
-  container.style.background = '#fff'
-  container.style.fontFamily = 'sans-serif'
-  container.innerHTML = pageHtml
-  document.body.appendChild(container)
-  const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 780, width: 780, useCORS: true })
-  document.body.removeChild(container)
-  const imgData = canvas.toDataURL('image/png')
+// Backward-compatible helper: same receipt 4-up (the single-payment download).
+function buildReceiptPageHtml(cellHtml) {
+  return buildReceiptSheetHtml([cellHtml, cellHtml, cellHtml, cellHtml])
+}
+
+// Renders one or more full-page sheet HTML strings into a single multi-page PDF.
+async function receiptSheetsToPdfBlob(pageHtmls) {
   const pdf = new jsPDF('p', 'mm', 'a4')
-  const pageWidth = pdf.internal.pageSize.getWidth()
-  const pageHeight = pdf.internal.pageSize.getHeight()
-  const imgHeight = Math.min((canvas.height * pageWidth) / canvas.width, pageHeight)
-  pdf.addImage(imgData, 'PNG', 0, 0, pageWidth, imgHeight)
+  for (let i = 0; i < pageHtmls.length; i++) {
+    const container = document.createElement('div')
+    container.style.position = 'fixed'
+    container.style.left = '-9999px'
+    container.style.top = '0'
+    container.style.width = '780px'
+    container.style.background = '#fff'
+    container.style.fontFamily = 'sans-serif'
+    container.innerHTML = pageHtmls[i]
+    document.body.appendChild(container)
+    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', windowWidth: 780, width: 780, useCORS: true })
+    document.body.removeChild(container)
+    const imgData = canvas.toDataURL('image/png')
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const pageHeight = pdf.internal.pageSize.getHeight()
+    const imgHeight = Math.min((canvas.height * pageWidth) / canvas.width, pageHeight)
+    if (i > 0) pdf.addPage()
+    pdf.addImage(imgData, 'PNG', 0, 0, pageWidth, imgHeight)
+  }
   return pdf.output('blob')
+}
+
+async function receiptToPdfBlob(pageHtml) {
+  return receiptSheetsToPdfBlob([pageHtml])
 }
 
 async function downloadReceipt({ payment, student, invoices, payments, meta }) {
@@ -3124,6 +3144,22 @@ function FeesScreen({ profile }) {
     if (error) { notify(`Couldn't set fee amount: ${error.message}`, 'error'); return }
     setInvAmount('')
     notify(existing ? 'Fee amount updated.' : 'Fee amount set.')
+    loadLedger()
+  }
+
+  async function deleteFeeAmount(id) {
+    if (!window.confirm('Delete this fee amount? This cannot be undone.')) return
+    // .select() after delete so we get back the rows that were actually
+    // removed. Without it, a DELETE blocked by a missing/mismatched RLS
+    // policy still returns success with zero rows affected — the UI would
+    // say "deleted" while the entry silently stays in the database.
+    const { data, error } = await supabase.from('fee_invoices').delete().eq('id', id).select()
+    if (error) { notify(`Couldn't delete: ${error.message}`, 'error'); return }
+    if (!data || data.length === 0) {
+      notify("Delete didn't go through — likely a Supabase RLS policy is blocking DELETE on fee_invoices for this role. Add/check a DELETE policy for finance/admin.", 'error')
+      return
+    }
+    notify('Fee amount deleted.')
     loadLedger()
   }
 
@@ -3195,15 +3231,18 @@ function FeesScreen({ profile }) {
                 </div>
                 <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th></tr></thead>
+                    <thead><tr><th style={th}>Term/Year</th><th style={{ ...th, textAlign: 'right' }}>Amount Due</th><th style={th}></th></tr></thead>
                     <tbody>
                       {invoices.map((i) => (
                         <tr key={i.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
                           <td style={td}>{i.term} {i.year}</td>
                           <td style={{ ...td, textAlign: 'right' }}>{Number(i.amount).toLocaleString()}</td>
+                          <td style={td}>
+                            <button onClick={() => deleteFeeAmount(i.id)} style={{ ...secondaryBtn, padding: '4px 10px', fontSize: 11.5, color: COLORS.warn, borderColor: COLORS.warn }}>Delete</button>
+                          </td>
                         </tr>
                       ))}
-                      {invoices.length === 0 && <tr><td colSpan={2} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
+                      {invoices.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No fee amount set yet.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -3249,6 +3288,196 @@ function FeesScreen({ profile }) {
             </div>
           </>
         )
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
+// FINANCE: Class Receipts — batch-generate receipts for a whole class.
+// Only students with a payment that hasn't been included in a receipt yet
+// are eligible by default, so re-running this for a class that had no new
+// payments since the last run produces nothing — new payments make a
+// student eligible again. Always shows a preview before anything downloads.
+// Different students' receipts are tiled 4-to-a-sheet (not 4 copies of the
+// same one) so a class run doesn't burn a full sheet per student.
+//
+// Requires a `receipted_at timestamptz` column on `fee_payments`:
+//   alter table fee_payments add column receipted_at timestamptz;
+// ============================================================================
+function ClassReceiptsScreen({ profile }) {
+  const { notify } = useNotify()
+  const { logoUrl, secondaryLogoUrl, receiptTemplateUrl } = useSchoolSettings()
+  const [cohort, setCohort] = useState(CLASS_OPTIONS[0].value)
+  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState([]) // { student, invoices, payments, unreceiptedPayments, balance }
+  const [selectedIds, setSelectedIds] = useState(new Set()) // payment ids selected for this run
+  const [includeAllPaid, setIncludeAllPaid] = useState(false)
+  const [previewSheets, setPreviewSheets] = useState(null)
+  const [previewPaymentIds, setPreviewPaymentIds] = useState([])
+  const [generating, setGenerating] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+
+  useEffect(() => { loadClass() }, [cohort])
+
+  async function loadClass() {
+    setLoading(true)
+    setPreviewSheets(null)
+    const { data: students } = await supabase.from('students').select('id, full_name, admission_no, cohort').eq('cohort', cohort).order('full_name')
+    const studentIds = (students || []).map((s) => s.id)
+    const [{ data: allInvoices }, { data: allPayments }] = await Promise.all([
+      studentIds.length ? supabase.from('fee_invoices').select('*').in('student_id', studentIds) : Promise.resolve({ data: [] }),
+      studentIds.length ? supabase.from('fee_payments').select('*').in('student_id', studentIds) : Promise.resolve({ data: [] }),
+    ])
+    const built = (students || []).map((student) => {
+      const invoices = (allInvoices || []).filter((i) => i.student_id === student.id)
+      const payments = (allPayments || []).filter((p) => p.student_id === student.id)
+      const unreceiptedPayments = payments.filter((p) => !p.receipted_at)
+      const totalInvoiced = invoices.reduce((sum, i) => sum + Number(i.amount || 0), 0)
+      const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0)
+      return { student, invoices, payments, unreceiptedPayments, balance: totalInvoiced - totalPaid }
+    })
+    setRows(built)
+    const defaultIds = new Set()
+    built.forEach((r) => r.unreceiptedPayments.forEach((p) => defaultIds.add(p.id)))
+    setSelectedIds(defaultIds)
+    setLoading(false)
+  }
+
+  const eligibleRows = rows.filter((r) => (includeAllPaid ? r.payments.length > 0 : r.unreceiptedPayments.length > 0))
+
+  function selectedPaymentsList() {
+    const list = []
+    rows.forEach((r) => {
+      const pool = includeAllPaid ? r.payments : r.unreceiptedPayments
+      pool.forEach((p) => { if (selectedIds.has(p.id)) list.push({ row: r, payment: p }) })
+    })
+    return list
+  }
+
+  async function generatePreview() {
+    const list = selectedPaymentsList()
+    if (list.length === 0) { notify('No students selected — nothing to generate.', 'error'); return }
+    setGenerating(true)
+    const meta = { logoUrl, secondaryLogoUrl, receiptTemplateUrl }
+    const cells = list.map(({ row, payment }) =>
+      buildReceiptCellHtml({ payment, student: row.student, invoices: row.invoices, payments: row.payments, meta })
+    )
+    const sheets = []
+    for (let i = 0; i < cells.length; i += 4) sheets.push(buildReceiptSheetHtml(cells.slice(i, i + 4)))
+    setPreviewSheets(sheets)
+    setPreviewPaymentIds(list.map(({ payment }) => payment.id))
+    setGenerating(false)
+  }
+
+  async function confirmDownload() {
+    if (!previewSheets || previewSheets.length === 0) return
+    setDownloading(true)
+    try {
+      const blob = await receiptSheetsToPdfBlob(previewSheets)
+      const label = CLASS_OPTIONS.find((c) => c.value === cohort)?.label.replace(/\s+/g, '_') || cohort
+      const fileName = `Receipts_${label}_${new Date().toISOString().slice(0, 10)}.pdf`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      URL.revokeObjectURL(url)
+      const { error } = await supabase.from('fee_payments').update({ receipted_at: new Date().toISOString() }).in('id', previewPaymentIds)
+      if (error) notify(`Downloaded, but couldn't mark payments as receipted: ${error.message}`, 'error')
+      else notify(`Downloaded ${previewPaymentIds.length} receipt(s).`)
+      setPreviewSheets(null)
+      loadClass()
+    } catch (err) {
+      notify(`Couldn't generate PDF: ${err.message}`, 'error')
+    }
+    setDownloading(false)
+  }
+
+  return (
+    <div style={{ ...pageWrap, maxWidth: 'none', width: '100%' }}>
+      <h2>Class Receipts</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
+        Batch-generate receipts for a class. Only students with a payment made since their last receipt run are included by
+        default — re-running this for the same class won't re-generate anyone whose payment status hasn't changed.
+      </p>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <label style={fieldLabel}>Class
+          <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={{ ...input, minWidth: 160 }}>
+            {CLASS_OPTIONS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: COLORS.muted, cursor: 'pointer' }}>
+          <input type="checkbox" checked={includeAllPaid} onChange={(e) => { setIncludeAllPaid(e.target.checked); setPreviewSheets(null) }} />
+          Include everyone who has paid (not just new/un-receipted payments)
+        </label>
+      </div>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading class...</p> : (
+        <>
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto', marginBottom: 16 }}>
+            <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead><tr><th style={th}></th><th style={th}>Name</th><th style={th}>Adm. No.</th><th style={{ ...th, textAlign: 'right' }}>Balance</th><th style={th}>Payments to receipt</th></tr></thead>
+              <tbody>
+                {eligibleRows.map((r) => {
+                  const pool = includeAllPaid ? r.payments : r.unreceiptedPayments
+                  const allChecked = pool.length > 0 && pool.every((p) => selectedIds.has(p.id))
+                  return (
+                    <tr key={r.student.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                      <td style={{ ...td, width: 34 }}>
+                        <input
+                          type="checkbox"
+                          checked={allChecked}
+                          onChange={(e) => {
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev)
+                              pool.forEach((p) => { if (e.target.checked) next.add(p.id); else next.delete(p.id) })
+                              return next
+                            })
+                          }}
+                        />
+                      </td>
+                      <td style={td}>{r.student.full_name}</td>
+                      <td style={{ ...td, color: COLORS.muted }}>{r.student.admission_no}</td>
+                      <td style={{ ...td, textAlign: 'right' }}>{r.balance.toLocaleString()}</td>
+                      <td style={td}>{pool.length} payment{pool.length === 1 ? '' : 's'}</td>
+                    </tr>
+                  )
+                })}
+                {eligibleRows.length === 0 && (
+                  <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>
+                    No students with {includeAllPaid ? 'payments' : 'new, un-receipted payments'} in this class.
+                  </td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <button onClick={generatePreview} disabled={generating || eligibleRows.length === 0} style={{ ...btn, marginBottom: 16 }}>
+            {generating ? 'Building preview...' : 'Generate Preview'}
+          </button>
+
+          {previewSheets && (
+            <>
+              <h3 style={{ fontSize: 15, marginBottom: 8 }}>
+                Preview — {previewPaymentIds.length} receipt{previewPaymentIds.length === 1 ? '' : 's'} on {previewSheets.length} sheet{previewSheets.length === 1 ? '' : 's'}
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 16, maxHeight: 600, overflow: 'auto', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 12 }}>
+                {previewSheets.map((sheetHtml, i) => (
+                  <div key={i} style={{ width: 330, height: 465, overflow: 'hidden', margin: '0 auto', border: `1px solid ${COLORS.ruleLight}`, borderRadius: 6 }}>
+                    <div style={{ width: 780, height: 1100, transform: 'scale(0.423)', transformOrigin: 'top left' }} dangerouslySetInnerHTML={{ __html: sheetHtml }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={confirmDownload} disabled={downloading} style={btn}>
+                  {downloading ? 'Preparing PDF...' : `⬇ Download ${previewSheets.length} sheet${previewSheets.length === 1 ? '' : 's'}`}
+                </button>
+                <button onClick={() => setPreviewSheets(null)} style={secondaryBtn}>Discard preview</button>
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   )
@@ -3419,7 +3648,7 @@ function FinanceStudentLookup() {
 // ============================================================================
 function FinanceHome({ profile, onLogout }) {
   const [showChangePw, setShowChangePw] = useState(false)
-  const [view, setView] = useState('fees') // 'fees' | 'pocket' | 'students'
+  const [view, setView] = useState('fees') // 'fees' | 'class-receipts' | 'pocket' | 'students'
   const { logoUrl } = useSchoolSettings()
   return (
     <div style={{ background: COLORS.paper, minHeight: '100vh' }}>
@@ -3437,10 +3666,12 @@ function FinanceHome({ profile, onLogout }) {
       <div style={pageWrap}>
         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
           <button onClick={() => setView('fees')} style={view === 'fees' ? btn : secondaryBtn}>School Fees</button>
+          <button onClick={() => setView('class-receipts')} style={view === 'class-receipts' ? btn : secondaryBtn}>Class Receipts</button>
           <button onClick={() => setView('pocket')} style={view === 'pocket' ? btn : secondaryBtn}>Pocket Money</button>
           <button onClick={() => setView('students')} style={view === 'students' ? btn : secondaryBtn}>Students</button>
         </div>
         {view === 'fees' && <FeesScreen profile={profile} />}
+        {view === 'class-receipts' && <ClassReceiptsScreen profile={profile} />}
         {view === 'pocket' && <PocketMoneyScreen profile={profile} />}
         {view === 'students' && <FinanceStudentLookup />}
       </div>
