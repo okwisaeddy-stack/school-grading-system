@@ -18,6 +18,7 @@ import {
 import {
   DEFAULT_KNEC_SCALE, kcseGrade, pointsForGrade, cbcLevel, CBC_POINTS,
   computeKcseAggregate, computeCbcTotal, DEFAULT_CBC_SCALE,
+  meanPoints, gradeForMeanPoints,
 } from './utils/grading'
 
 // ============================================================================
@@ -524,9 +525,11 @@ function useIsNarrow() {
 
 function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const isLeadership = LEADERSHIP_TITLES.includes(title)
+  const canSeeFinance = FINANCE_VISIBLE_TITLES.includes(title)
   const tabs = [
     'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
-    ...(isLeadership ? ['Enter Marks', 'Enrollment'] : []),
+    ...(isLeadership ? ['Enter Marks'] : []),
+    ...(canSeeFinance ? ['Finance'] : []),
     'My Teaching', 'Approvals', 'Settings',
   ]
   const isNarrow = useIsNarrow()
@@ -698,7 +701,20 @@ function ApprovalsScreen({ currentUserId, viewerTitle }) {
   const [actioningAssignmentId, setActioningAssignmentId] = useState(null)
   const canSeeFinance = FINANCE_VISIBLE_TITLES.includes(viewerTitle)
 
-  useEffect(() => { loadPending(); loadPendingAssignments() }, [])
+  useEffect(() => {
+    loadPending()
+    loadPendingAssignments()
+    // Keep every admin's Approvals screen in sync in real time: as soon as
+    // one admin approves/rejects a signup or a teacher assignment, it drops
+    // off everyone else's pending list too, instead of sitting there until
+    // they happen to refresh and risking a duplicate/conflicting action.
+    const channel = supabase
+      .channel('approvals-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => loadPending())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'teacher_assignments' }, () => loadPendingAssignments())
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
   async function loadPending() {
     setLoading(true)
@@ -1294,6 +1310,10 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
   const [entranceMax, setEntranceMax] = useState(student.entrance_max ?? '')
   const [parentName, setParentName] = useState(student.parent_name ?? '')
   const [parentPhone, setParentPhone] = useState(student.parent_phone ?? '')
+  const [medicalNotes, setMedicalNotes] = useState(student.medical_notes ?? '')
+  const [educationalTrack, setEducationalTrack] = useState(student.educational_track ?? '')
+  const [extracurricular, setExtracurricular] = useState(student.extracurricular ?? '')
+  const [generalNotes, setGeneralNotes] = useState(student.general_notes ?? '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [blockedMsg, setBlockedMsg] = useState('')
@@ -1356,6 +1376,10 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
       entrance_max: entranceMax === '' ? null : Number(entranceMax),
       parent_name: parentName.trim() || null,
       parent_phone: parentPhone.trim() || null,
+      medical_notes: medicalNotes.trim() || null,
+      educational_track: educationalTrack.trim() || null,
+      extracurricular: extracurricular.trim() || null,
+      general_notes: generalNotes.trim() || null,
     }).eq('id', student.id)
     if (studentError) { setError(studentError.message); setSaving(false); return }
 
@@ -1389,7 +1413,7 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
 
   return (
     <div style={modalOverlay}>
-      <div style={{ ...modalCard, maxWidth: 'min(520px, 94vw)' }}>
+      <div style={{ ...modalCard, maxWidth: 'min(560px, 94vw)', maxHeight: '90vh', overflowY: 'auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
           <h3>Edit Student</h3>
           <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
@@ -1417,6 +1441,37 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
         <label style={fieldLabel}>Parent phone
           <input value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} style={input} />
         </label>
+
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.ruleLight}` }}>
+          <div style={sectionLabel}>Student Details</div>
+          <label style={fieldLabel}>Educational track / stream
+            <input
+              value={educationalTrack} onChange={(e) => setEducationalTrack(e.target.value)} style={input}
+              placeholder="e.g. STEM, Arts & Sports Science, Social Sciences"
+            />
+          </label>
+          <label style={fieldLabel}>Medical (conditions / allergies)
+            <textarea
+              value={medicalNotes} onChange={(e) => setMedicalNotes(e.target.value)}
+              style={{ ...input, minHeight: 60, resize: 'vertical', fontFamily: 'inherit' }}
+              placeholder="Any conditions, allergies, or medication staff should know about"
+            />
+          </label>
+          <label style={fieldLabel}>Extracurricular activities
+            <textarea
+              value={extracurricular} onChange={(e) => setExtracurricular(e.target.value)}
+              style={{ ...input, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }}
+              placeholder="Clubs, sports, societies, competitions..."
+            />
+          </label>
+          <label style={fieldLabel}>Notes
+            <textarea
+              value={generalNotes} onChange={(e) => setGeneralNotes(e.target.value)}
+              style={{ ...input, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }}
+              placeholder="Anything else worth recording about this student"
+            />
+          </label>
+        </div>
 
         {(isForm34 || isGrade10) && (
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${COLORS.ruleLight}` }}>
@@ -1471,215 +1526,161 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
 }
 
 // ============================================================================
-// ADMIN: Bulk Class Enrollment — set every student's subjects for a whole
-// class on one screen, instead of one at a time via Edit Student, and
-// instead of hand-written SQL.
+// STUDENT DETAILS — read-only view of a student's full record (medical,
+// educational track, extracurricular, notes) surfaced from the Students list.
 // ============================================================================
-function BulkEnrollmentScreen() {
-  const { notify } = useNotify()
-  const [cohort, setCohort] = useState('form_3')
-  const [allSubjects, setAllSubjects] = useState([])
-  const [students, setStudents] = useState([])
-  const [rows, setRows] = useState({}) // { studentId: { oneOfChoice, electives: [], grade10Electives: [] } }
+function StudentDetailsModal({ student, onClose }) {
+  const Field = ({ label, value, multiline }) => (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, color: COLORS.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 13.5, whiteSpace: multiline ? 'pre-wrap' : 'normal', color: value ? COLORS.ink : COLORS.muted }}>
+        {value || 'Not recorded'}
+      </div>
+    </div>
+  )
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(520px, 94vw)', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3>{student.full_name}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+          <Field label="Admission No." value={student.admission_no} />
+          <Field label="Cohort" value={`${student.cohort || ''}${student.pathway ? ` · ${student.pathway}` : ''}`} />
+          <Field label="Parent / Guardian" value={student.parent_name} />
+          <Field label="Parent Phone" value={student.parent_phone} />
+        </div>
+        <div style={{ paddingTop: 12, borderTop: `1px solid ${COLORS.ruleLight}` }}>
+          <Field label="Educational Track / Stream" value={student.educational_track} />
+          <Field label="Medical (conditions / allergies)" value={student.medical_notes} multiline />
+          <Field label="Extracurricular Activities" value={student.extracurricular} multiline />
+          <Field label="Notes" value={student.general_notes} multiline />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+          <button onClick={onClose} style={secondaryBtn}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// STUDENT PERFORMANCE — admin view of one student's educational performance
+// across exams: overall average trend plus a per-subject trend, both as
+// graphs, reusing buildProgressGraphSvg.
+// ============================================================================
+function StudentPerformanceModal({ student, onClose }) {
+  const { scale: gradeScale } = useGradeScale()
+  const { scale: cbcScale } = useCbcScale()
+  const [exams, setExams] = useState([])
+  const [subjects, setSubjects] = useState([]) // [{id, name}]
+  const [marksIndex, setMarksIndex] = useState({}) // `${examId}:${subjectId}` -> score
+  const [selectedSubjectId, setSelectedSubjectId] = useState('overall')
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [savedMsg, setSavedMsg] = useState('')
+  const isCbc = student.cohort === 'grade_10'
+  const scale = isCbc ? cbcScale : gradeScale
+  const gradeLabelFor = (score) => (score === null || score === undefined ? null : (isCbc ? cbcLevel(score, scale) : kcseGrade(score, scale)))
 
-  const isForm34 = cohort === 'form_3' || cohort === 'form_4'
+  useEffect(() => { loadPerformance() }, [student.id])
 
-  const cohortOptions = [
-    { value: 'form_3', label: 'Form 3' },
-    { value: 'form_4', label: 'Form 4' },
-    { value: 'grade_10', label: 'Grade 10' },
-  ]
-
-  const FORM34_ELECTIVE_MENU = ['Physics', 'Biology', 'Geography', 'History', 'CRE', 'French', 'German']
-  const namesInUse = isForm34
-    ? [...COMPULSORY_84, ...ONE_OF_GROUP, ...FORM34_ELECTIVE_MENU]
-    : [...GRADE10_COMPULSORY, ...GRADE10_ELECTIVE_MENU]
-  const knownNames = new Set((allSubjects || []).map((s) => s.name))
-  const missingNames = namesInUse.filter((n) => !knownNames.has(n))
-
-  useEffect(() => { loadClass() }, [cohort])
-
-  function blankRow() { return { oneOfChoice: '', electives: [], grade10Electives: [] } }
-
-  async function loadClass() {
+  async function loadPerformance() {
     setLoading(true)
-    setSavedMsg('')
-    const [{ data: subjectData }, { data: studentData }] = await Promise.all([
-      supabase.from('subjects').select('*'),
-      supabase.from('students').select('*').eq('cohort', cohort).order('full_name'),
+    const [{ data: examData }, { data: subjectRows }] = await Promise.all([
+      supabase.from('exams').select('*').order('order_index', { ascending: true }),
+      supabase.from('student_subjects').select('subject_id, subjects(name)').eq('student_id', student.id),
     ])
-    setAllSubjects(subjectData || [])
-    setStudents(studentData || [])
-    const studentIds = (studentData || []).map((s) => s.id)
-    const initRows = {}
-    ;(studentData || []).forEach((s) => { initRows[s.id] = blankRow() })
-    if (studentIds.length > 0) {
-      const { data: enrollRows } = await supabase
-        .from('student_subjects').select('student_id, is_compulsory, subjects(name)').in('student_id', studentIds)
-      ;(enrollRows || []).forEach((r) => {
-        const name = r.subjects?.name
-        const row = initRows[r.student_id]
-        if (!name || r.is_compulsory || !row) return
-        if (isForm34) {
-          if (ONE_OF_GROUP.includes(name)) row.oneOfChoice = name
-          else row.electives.push(name)
-        } else if (GRADE10_ELECTIVE_MENU.includes(name)) {
-          row.grade10Electives.push(name)
-        }
-      })
-    }
-    setRows(initRows)
+    const subjectList = (subjectRows || [])
+      .filter((r) => r.subjects?.name)
+      .map((r) => ({ id: r.subject_id, name: r.subjects.name }))
+    setExams(examData || [])
+    setSubjects(subjectList)
+    const subjectIds = subjectList.map((s) => s.id)
+    const { data: marksData } = subjectIds.length > 0
+      ? await supabase.from('marks').select('score, exam_id, subject_id').eq('student_id', student.id).in('subject_id', subjectIds)
+      : { data: [] }
+    const index = {}
+    ;(marksData || []).forEach((m) => { index[`${m.exam_id}:${m.subject_id}`] = m.score })
+    setMarksIndex(index)
     setLoading(false)
   }
 
-  function toggleElective(studentId, subject) {
-    setRows((prev) => {
-      const row = prev[studentId] || blankRow()
-      const has = row.electives.includes(subject)
-      if (!has && isExcludedTogether(row.electives, subject)) {
-        const pair = EXCLUSION_PAIRS.find(([a, b]) => a === subject || b === subject)
-        const conflict = pair.find((s) => s !== subject)
-        notify(`Can't add ${subject} — already taking ${conflict} for this student.`, 'error')
-        return prev
-      }
-      const nextElectives = has ? row.electives.filter((s) => s !== subject) : [...row.electives, subject]
-      return { ...prev, [studentId]: { ...row, electives: nextElectives } }
-    })
-  }
+  const overallTimeline = exams.map((e) => {
+    const scores = subjects.map((s) => marksIndex[`${e.id}:${s.id}`]).filter((v) => v !== undefined && v !== null)
+    return { label: e.name, value: scores.length > 0 ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10 : null }
+  }).filter((t) => t.value !== null)
 
-  function toggleGrade10Elective(studentId, subject) {
-    setRows((prev) => {
-      const row = prev[studentId] || blankRow()
-      const has = row.grade10Electives.includes(subject)
-      const next = has ? row.grade10Electives.filter((s) => s !== subject) : [...row.grade10Electives, subject]
-      return { ...prev, [studentId]: { ...row, grade10Electives: next } }
-    })
-  }
+  const subjectTimeline = selectedSubjectId === 'overall' ? overallTimeline : exams.map((e) => ({
+    label: e.name,
+    value: marksIndex[`${e.id}:${selectedSubjectId}`],
+  })).filter((t) => t.value !== undefined && t.value !== null)
 
-  function setOneOf(studentId, value) {
-    setRows((prev) => ({ ...prev, [studentId]: { ...(prev[studentId] || blankRow()), oneOfChoice: value } }))
-  }
-
-  async function saveAll() {
-    setSaving(true)
-    setSavedMsg('')
-    const subjectByName = Object.fromEntries((allSubjects || []).map((s) => [s.name, s.id]))
-    let ok = 0
-    let failed = 0
-    const CONCURRENCY = 4
-    const studentIds = students.map((s) => s.id)
-    for (let i = 0; i < studentIds.length; i += CONCURRENCY) {
-      const batch = studentIds.slice(i, i + CONCURRENCY)
-      await Promise.all(batch.map(async (studentId) => {
-        const row = rows[studentId] || blankRow()
-        const insertRows = isForm34
-          ? [
-              ...COMPULSORY_84.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: true })),
-              ...row.electives.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: false })),
-              ...(row.oneOfChoice ? [{ student_id: studentId, subject_id: subjectByName[row.oneOfChoice], is_compulsory: false }] : []),
-            ]
-          : [
-              ...GRADE10_COMPULSORY.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: true })),
-              ...row.grade10Electives.map((name) => ({ student_id: studentId, subject_id: subjectByName[name], is_compulsory: false })),
-            ]
-        const validRows = insertRows.filter((r) => r.subject_id)
-        const { error: deleteError } = await supabase.from('student_subjects').delete().eq('student_id', studentId)
-        if (deleteError) { failed++; return }
-        if (validRows.length > 0) {
-          const { error: insertError } = await supabase.from('student_subjects').insert(validRows)
-          if (insertError) { failed++; return }
-        }
-        ok++
-      }))
-    }
-    setSaving(false)
-    setSavedMsg(failed === 0 ? `Saved enrollment for ${ok} student${ok === 1 ? '' : 's'}.` : `Saved ${ok}, ${failed} failed — try again for the rest.`)
-    if (failed === 0) notify(`Enrollment saved for ${ok} student${ok === 1 ? '' : 's'}.`)
-  }
+  const latestExam = exams.length > 0 ? exams[exams.length - 1] : null
+  const latestSubjectRows = latestExam ? subjects.map((s) => ({
+    ...s,
+    score: marksIndex[`${latestExam.id}:${s.id}`],
+  })).filter((r) => r.score !== undefined && r.score !== null) : []
 
   return (
-    <div style={pageWrap}>
-      <h2>Class Enrollment</h2>
-      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
-        Set every student's subjects for a whole class on one screen. Compulsory subjects are locked in automatically; pick each student's electives below, then Save All.
-      </p>
-      <label style={{ ...fieldLabel, marginBottom: 18, maxWidth: 220 }}>Class
-        <select value={cohort} onChange={(e) => setCohort(e.target.value)} style={input}>
-          {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-        </select>
-      </label>
-
-      {!loading && missingNames.length > 0 && (
-        <div style={{ ...errorText, background: '#fff4f4', border: '1px solid #f3c8c8', borderRadius: 8, padding: 12, marginBottom: 16 }}>
-          These subject names don't match anything in your subjects table, so ticking them will silently save nothing:{' '}
-          <strong>{missingNames.join(', ')}</strong>. Check the exact spelling in your <code>subjects</code> table (e.g. run <code>select name from subjects order by name;</code> in Supabase) and let me know the real names so I can fix the pill labels.
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(600px, 94vw)', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <h3>{student.full_name} — Performance</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
         </div>
-      )}
+        <p style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 14 }}>{student.admission_no} · {student.cohort}{student.pathway ? ` · ${student.pathway}` : ''}</p>
 
-      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : students.length === 0 ? (
-        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
-          No students in this class yet.
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {students.map((s) => {
-            const row = rows[s.id] || blankRow()
-            return (
-              <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div style={{ fontWeight: 700 }}>{s.full_name}</div>
-                  <div style={{ fontSize: 11.5, color: COLORS.muted }}>{s.admission_no}</div>
+        {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={sectionLabel}>Progress</div>
+              <select value={selectedSubjectId} onChange={(e) => setSelectedSubjectId(e.target.value)} style={{ ...input, maxWidth: 200 }}>
+                <option value="overall">Overall Average</option>
+                {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+            {subjectTimeline.length === 0 ? (
+              <p style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 16 }}>No marks recorded yet.</p>
+            ) : (
+              <div style={{ marginBottom: 16 }} dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(subjectTimeline) }} />
+            )}
+
+            <div style={{ paddingTop: 12, borderTop: `1px solid ${COLORS.ruleLight}` }}>
+              <div style={sectionLabel}>{latestExam ? `${latestExam.name} — By Subject` : 'By Subject'}</div>
+              {latestSubjectRows.length === 0 ? (
+                <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks recorded for the most recent exam.</p>
+              ) : (
+                <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                    <thead><tr><th style={th}>Subject</th><th style={{ ...th, textAlign: 'center' }}>Score</th><th style={{ ...th, textAlign: 'center' }}>Grade</th></tr></thead>
+                    <tbody>
+                      {latestSubjectRows.map((r) => (
+                        <tr key={r.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                          <td style={td}>{r.name}</td>
+                          <td style={{ ...td, textAlign: 'center' }}>{r.score}</td>
+                          <td style={{ ...td, textAlign: 'center', fontWeight: 700 }}>{gradeLabelFor(r.score)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                {isForm34 ? (
-                  <>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                      {COMPULSORY_84.map((n) => <span key={n} style={pillStatic}>{n}</span>)}
-                    </div>
-                    <label style={{ ...fieldLabel, maxWidth: 320, marginBottom: 8 }}>One of Computer Studies / Business Studies / Agriculture
-                      <select value={row.oneOfChoice} onChange={(e) => setOneOf(s.id, e.target.value)} style={input}>
-                        <option value="">Select…</option>
-                        {ONE_OF_GROUP.map((n) => <option key={n} value={n}>{n}</option>)}
-                      </select>
-                    </label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {FORM34_ELECTIVE_MENU.map((n) => (
-                        <span key={n} onClick={() => toggleElective(s.id, n)} style={pillBtn(row.electives.includes(n))}>{n}</span>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                      {GRADE10_COMPULSORY.map((n) => <span key={n} style={pillStatic}>{n}</span>)}
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {GRADE10_ELECTIVE_MENU.map((n) => (
-                        <span key={n} onClick={() => toggleGrade10Elective(s.id, n)} style={pillBtn(row.grade10Electives.includes(n))}>{n}</span>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
+              )}
+            </div>
+          </>
+        )}
 
-      {students.length > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
-          <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg}</span>
-          <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+          <button onClick={onClose} style={secondaryBtn}>Close</button>
         </div>
-      )}
+      </div>
     </div>
   )
 }
 
 // ============================================================================
 // STUDENTS SCREEN
+// (Bulk Class Enrollment screen removed — enrollment is handled per-student
+// via Edit Student now.)
 // ============================================================================
 function StudentsScreen() {
   const { notify, confirmAction } = useNotify()
@@ -1690,6 +1691,8 @@ function StudentsScreen() {
   const [showAdd, setShowAdd] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [editingStudent, setEditingStudent] = useState(null)
+  const [viewingStudent, setViewingStudent] = useState(null)
+  const [analysingStudent, setAnalysingStudent] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
   const [cohortFilter, setCohortFilter] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
@@ -1802,7 +1805,7 @@ function StudentsScreen() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {filteredStudents.map((s) => (
             <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{s.full_name}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8, cursor: 'pointer', color: COLORS.accent }} onClick={() => setAnalysingStudent(s)}>{s.full_name}</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 12.5, marginBottom: 10 }}>
                 <div><span style={{ color: COLORS.muted }}>Adm. No.</span><br/>{s.admission_no}</div>
                 <div><span style={{ color: COLORS.muted }}>Cohort</span><br/>{s.cohort}{s.pathway ? ` · ${s.pathway}` : ''}</div>
@@ -1816,6 +1819,8 @@ function StudentsScreen() {
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 16, borderTop: `1px solid ${COLORS.ruleLight}`, paddingTop: 8 }}>
+                <button onClick={() => setViewingStudent(s)} style={{ fontSize: 12.5, color: COLORS.ink, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>Details</button>
+                <button onClick={() => setAnalysingStudent(s)} style={{ fontSize: 12.5, color: COLORS.ink, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>Performance</button>
                 <button onClick={() => setEditingStudent(s)} style={{ fontSize: 12.5, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>Edit</button>
                 <button onClick={() => handleDelete(s.id, s.full_name)} disabled={deletingId === s.id} style={{ fontSize: 12.5, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 600 }}>
                   {deletingId === s.id ? 'Deleting...' : 'Delete'}
@@ -1837,13 +1842,15 @@ function StudentsScreen() {
             <tbody>
               {filteredStudents.map((s) => (
                 <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
-                  <td style={td}>{s.full_name}</td>
+                  <td style={{ ...td, cursor: 'pointer', color: COLORS.accent, fontWeight: 600 }} onClick={() => setAnalysingStudent(s)}>{s.full_name}</td>
                   <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
                   <td style={td}>{s.cohort}{s.pathway ? ` · ${s.pathway}` : ''}</td>
                   <td style={{ ...td, maxWidth: 260 }}><SubjectTags studentId={s.id} /></td>
                   <td style={{ ...td, color: COLORS.muted }}>{s.entrance_type ? `${s.entrance_score}/${s.entrance_max}` : '—'}</td>
                   <td style={{ ...td, textAlign: 'right' }}>
                     <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                      <button onClick={() => setViewingStudent(s)} style={{ fontSize: 12, color: COLORS.ink, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Details</button>
+                      <button onClick={() => setAnalysingStudent(s)} style={{ fontSize: 12, color: COLORS.ink, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Performance</button>
                       <button onClick={() => setEditingStudent(s)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Edit</button>
                       <button onClick={() => handleDelete(s.id, s.full_name)} disabled={deletingId === s.id} style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
                         {deletingId === s.id ? 'Deleting...' : 'Delete'}
@@ -1863,6 +1870,8 @@ function StudentsScreen() {
       {showAdd && <AddStudentModal onClose={() => setShowAdd(false)} onSaved={loadStudents} />}
       {showImport && <BulkImportModal onClose={() => setShowImport(false)} onImported={loadStudents} allSubjects={allSubjects} />}
       {editingStudent && <EditStudentModal student={editingStudent} allSubjects={allSubjects} onClose={() => setEditingStudent(null)} onSaved={loadStudents} />}
+      {viewingStudent && <StudentDetailsModal student={viewingStudent} onClose={() => setViewingStudent(null)} />}
+      {analysingStudent && <StudentPerformanceModal student={analysingStudent} onClose={() => setAnalysingStudent(null)} />}
     </div>
   )
 }
@@ -2902,6 +2911,232 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
 // TEACHER: Full-page Marks Entry (own header + logout) — used when logged in
 // as an approved teacher, not an admin
 // ============================================================================
+// ============================================================================
+// TEACHER/ADMIN: Analysis — class-wide and individual-student performance
+// breakdown for a teacher's own subject+class assignment: average trend
+// across exams, grade distribution, top/bottom performers, and a per-student
+// progress line.
+// ============================================================================
+function AnalysisScreen({ teacherId, adminMode = false, manualAssignment = null }) {
+  const { scale: gradeScale } = useGradeScale()
+  const { scale: cbcScale } = useCbcScale()
+  const [assignments, setAssignments] = useState([])
+  const [selectedAssignment, setSelectedAssignment] = useState('')
+  const [exams, setExams] = useState([])
+  const [selectedExamId, setSelectedExamId] = useState('')
+  const [students, setStudents] = useState([])
+  const [marksIndex, setMarksIndex] = useState({}) // `${examId}:${studentId}` -> score
+  const [selectedStudentId, setSelectedStudentId] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  function currentAssignment() {
+    if (adminMode) return manualAssignment
+    return assignments.find((a) => a.id === selectedAssignment) || null
+  }
+
+  useEffect(() => { loadAssignmentsAndExams() }, [teacherId, adminMode])
+  useEffect(() => {
+    const ready = adminMode ? manualAssignment : selectedAssignment
+    if (ready) loadAnalysis()
+  }, [selectedAssignment, adminMode, manualAssignment])
+
+  async function loadAssignmentsAndExams() {
+    setLoading(true)
+    const { data: examData } = await supabase.from('exams').select('*').order('order_index', { ascending: true })
+    setExams(examData || [])
+    if (!adminMode) {
+      const { data: assignData } = await supabase
+        .from('teacher_assignments').select('*, subjects(name)').eq('teacher_id', teacherId).eq('status', 'approved')
+      setAssignments(assignData || [])
+      if (assignData && assignData.length > 0) setSelectedAssignment(assignData[0].id)
+    }
+    setLoading(false)
+  }
+
+  async function loadAnalysis() {
+    setLoading(true)
+    const assignment = currentAssignment()
+    if (!assignment) { setStudents([]); setMarksIndex({}); setLoading(false); return }
+    const { data: classStudents } = await supabase
+      .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
+    const classStudentIds = (classStudents || []).map((s) => s.id)
+    const { data: allEnrollmentRows } = await supabase
+      .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
+    const enrolledForSubject = new Set(
+      (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
+    )
+    const subjectName = assignment.subjects?.name
+    const isElectiveSubject =
+      ONE_OF_GROUP.includes(subjectName) ||
+      EXCLUSION_PAIRS.some((pair) => pair.includes(subjectName)) ||
+      GRADE10_ELECTIVE_MENU.includes(subjectName)
+    const eligibleStudents = (classStudents || []).filter((s) => (isElectiveSubject ? enrolledForSubject.has(s.id) : true))
+    const examIds = exams.map((e) => e.id)
+    const { data: marksData } = examIds.length > 0
+      ? await supabase.from('marks').select('*').eq('subject_id', assignment.subject_id).in('exam_id', examIds)
+      : { data: [] }
+    const index = {}
+    ;(marksData || []).forEach((m) => { index[`${m.exam_id}:${m.student_id}`] = m.score })
+    setStudents(eligibleStudents)
+    setMarksIndex(index)
+    if (eligibleStudents.length > 0) {
+      setSelectedStudentId((prev) => (eligibleStudents.some((s) => s.id === prev) ? prev : eligibleStudents[0].id))
+    } else {
+      setSelectedStudentId('')
+    }
+    setLoading(false)
+  }
+
+  const assignment = currentAssignment()
+  const isCbc = assignment?.class_label === 'grade_10'
+  const scale = isCbc ? cbcScale : gradeScale
+  const gradeLabelFor = (score) => (score === null || score === undefined ? null : (isCbc ? cbcLevel(score, scale) : kcseGrade(score, scale)))
+
+  const maxScalePoints = Math.max(...scale.map((r) => r.points))
+  const classAvgTimeline = exams.map((e) => {
+    const scores = students.map((s) => marksIndex[`${e.id}:${s.id}`]).filter((v) => v !== undefined && v !== null)
+    const mp = meanPoints(scores, scale, isCbc)
+    return { label: e.name, value: mp !== null ? Math.round(mp * 100) / 100 : null, grade: mp !== null ? gradeForMeanPoints(mp, scale) : null }
+  }).filter((t) => t.value !== null)
+
+  // Default the exam selector to the most recent exam that actually has marks
+  useEffect(() => {
+    if (!selectedExamId && exams.length > 0) {
+      const withData = [...exams].reverse().find((e) => students.some((s) => marksIndex[`${e.id}:${s.id}`] !== undefined))
+      setSelectedExamId((withData || exams[exams.length - 1])?.id || '')
+    }
+  }, [exams, students, marksIndex])
+
+  const examScores = students
+    .map((s) => ({ student: s, score: marksIndex[`${selectedExamId}:${s.id}`] }))
+    .filter((r) => r.score !== undefined && r.score !== null)
+
+  const gradeDistribution = scale.map((band) => ({
+    label: band.label,
+    count: examScores.filter((r) => gradeLabelFor(r.score) === band.label).length,
+  })).filter((b) => b.count > 0)
+  const maxGradeCount = Math.max(1, ...gradeDistribution.map((b) => b.count))
+
+  const ranked = [...examScores].sort((a, b) => b.score - a.score)
+  const topPerformers = ranked.slice(0, 5)
+  const bottomPerformers = ranked.slice(-5).reverse()
+
+  const studentTimeline = exams.map((e) => ({
+    label: e.name,
+    value: marksIndex[`${e.id}:${selectedStudentId}`],
+  })).filter((t) => t.value !== undefined && t.value !== null)
+
+  return (
+    <div style={pageWrap}>
+      <h2>Analysis</h2>
+      {!adminMode && (
+        <label style={{ ...fieldLabel, maxWidth: 320, marginBottom: 18 }}>Subject / Class
+          <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={input}>
+            {assignments.length === 0 && <option value="">No approved assignments yet</option>}
+            {assignments.map((a) => (
+              <option key={a.id} value={a.id}>{a.subjects?.name} — {a.class_label}</option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : !assignment ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No approved subject/class assignment selected yet.
+        </div>
+      ) : (
+        <>
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={sectionLabel}>Class Mean Trend</div>
+              {classAvgTimeline.length > 0 && (
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 11, color: COLORS.muted, fontWeight: 700, textTransform: 'uppercase' }}>Latest Mean</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: COLORS.accent }}>
+                    {classAvgTimeline[classAvgTimeline.length - 1].grade} ({classAvgTimeline[classAvgTimeline.length - 1].value})
+                  </div>
+                </div>
+              )}
+            </div>
+            {classAvgTimeline.length === 0 ? (
+              <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks recorded yet for this class/subject.</p>
+            ) : (
+              <div dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(classAvgTimeline, maxScalePoints) }} />
+            )}
+          </div>
+
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+              <div style={sectionLabel}>Grade Distribution</div>
+              <select value={selectedExamId} onChange={(e) => setSelectedExamId(e.target.value)} style={{ ...input, maxWidth: 200 }}>
+                {exams.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </div>
+            {gradeDistribution.length === 0 ? (
+              <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks recorded for this exam.</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {gradeDistribution.map((b) => (
+                  <div key={b.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 12, width: 36, flexShrink: 0, fontWeight: 700 }}>{b.label}</span>
+                    <div style={{ flex: 1, background: COLORS.ruleLight, borderRadius: 4, overflow: 'hidden', height: 14 }}>
+                      <div style={{ width: `${(b.count / maxGradeCount) * 100}%`, background: COLORS.accent, height: '100%' }} />
+                    </div>
+                    <span style={{ fontSize: 12, color: COLORS.muted, width: 20, textAlign: 'right', flexShrink: 0 }}>{b.count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 16 }}>
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+              <div style={sectionLabel}>Top Performers</div>
+              {topPerformers.length === 0 ? <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks yet.</p> : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {topPerformers.map((r, i) => (
+                    <div key={r.student.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                      <span>{i + 1}. {r.student.full_name}</span>
+                      <span style={{ fontWeight: 700 }}>{r.score}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+              <div style={sectionLabel}>Needs Attention</div>
+              {bottomPerformers.length === 0 ? <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks yet.</p> : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {bottomPerformers.map((r, i) => (
+                    <div key={r.student.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                      <span>{r.student.full_name}</span>
+                      <span style={{ fontWeight: 700, color: COLORS.warn }}>{r.score}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+              <div style={sectionLabel}>Individual Student Progress</div>
+              <select value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)} style={{ ...input, maxWidth: 220 }}>
+                {students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+              </select>
+            </div>
+            {studentTimeline.length === 0 ? (
+              <p style={{ fontSize: 12.5, color: COLORS.muted }}>No marks recorded yet for this student.</p>
+            ) : (
+              <div dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(studentTimeline) }} />
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
   const [showChangePw, setShowChangePw] = useState(false)
   const [view, setView] = useState('marks') // 'marks' | 'attendance' | 'timetable'
@@ -2920,12 +3155,14 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
         </div>
       </div>
       <div style={pageWrap}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
           <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
+          <button onClick={() => setView('analysis')} style={view === 'analysis' ? btn : secondaryBtn}>Analysis</button>
           <button onClick={() => setView('attendance')} style={view === 'attendance' ? btn : secondaryBtn}>Attendance</button>
           <button onClick={() => setView('timetable')} style={view === 'timetable' ? btn : secondaryBtn}>My Timetable</button>
         </div>
         {view === 'marks' && <MarksEntryContent teacherId={teacherId} />}
+        {view === 'analysis' && <AnalysisScreen teacherId={teacherId} />}
         {view === 'attendance' && <TeacherAttendanceScreen teacherId={teacherId} />}
         {view === 'timetable' && <TeacherTimetableScreen teacherId={teacherId} />}
       </div>
@@ -2939,12 +3176,18 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
 // their own marks, using the exact same logic as regular teachers
 // ============================================================================
 function AdminTeachingScreen({ profile }) {
+  const [view, setView] = useState('marks')
   return (
     <div style={pageWrap}>
-      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 4 }}>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 12 }}>
         If you also teach a subject, assign it here and enter marks the same way any teacher would.
       </p>
-      <MarksEntryContent teacherId={profile.id} />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
+        <button onClick={() => setView('analysis')} style={view === 'analysis' ? btn : secondaryBtn}>Analysis</button>
+      </div>
+      {view === 'marks' && <MarksEntryContent teacherId={profile.id} />}
+      {view === 'analysis' && <AnalysisScreen teacherId={profile.id} />}
     </div>
   )
 }
@@ -3866,6 +4109,30 @@ function FinanceHome({ profile, onLogout }) {
 }
 
 // ============================================================================
+// ADMIN (Finance-visible titles only): Finance tab — reuses the same Fees,
+// Class Receipts, Pocket Money, and Student Lookup screens the Bursar/finance
+// role uses, so leadership doesn't need a separate finance login to check on
+// fees, receipts, or pocket money.
+// ============================================================================
+function AdminFinanceScreen({ profile }) {
+  const [view, setView] = useState('fees') // 'fees' | 'class-receipts' | 'pocket' | 'students'
+  return (
+    <div style={pageWrap}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+        <button onClick={() => setView('fees')} style={view === 'fees' ? btn : secondaryBtn}>School Fees</button>
+        <button onClick={() => setView('class-receipts')} style={view === 'class-receipts' ? btn : secondaryBtn}>Class Receipts</button>
+        <button onClick={() => setView('pocket')} style={view === 'pocket' ? btn : secondaryBtn}>Pocket Money</button>
+        <button onClick={() => setView('students')} style={view === 'students' ? btn : secondaryBtn}>Students</button>
+      </div>
+      {view === 'fees' && <FeesScreen profile={profile} />}
+      {view === 'class-receipts' && <ClassReceiptsScreen profile={profile} />}
+      {view === 'pocket' && <PocketMoneyScreen profile={profile} />}
+      {view === 'students' && <FinanceStudentLookup />}
+    </div>
+  )
+}
+
+// ============================================================================
 // ADMIN (Leadership only): "Enter Marks" — Principal / Deputy Principal /
 // Dean of Studies / School Manager / Director can enter or correct marks for
 // ANY subject and class directly, without needing a teacher_assignments row
@@ -3997,14 +4264,14 @@ function GradeScaleProvider({ children }) {
 // Replaces the single-student ReportsScreen with one that supports both
 // single and batch modes, plus a WhatsApp send link per student.
 // ============================================================================
-function buildProgressGraphSvg(timeline) {
+function buildProgressGraphSvg(timeline, maxValue = 100) {
   if (!timeline || timeline.length === 0) return ''
   const width = 700, height = 140, padding = { top: 10, right: 16, bottom: 24, left: 30 }
   const chartW = width - padding.left - padding.right
   const chartH = height - padding.top - padding.bottom
   const n = timeline.length
   const xFor = (i) => padding.left + (n === 1 ? chartW / 2 : (i / (n - 1)) * chartW)
-  const yFor = (v) => padding.top + chartH - (v / 100) * chartH
+  const yFor = (v) => padding.top + chartH - (v / maxValue) * chartH
 
   const points = timeline.map((t, i) => `${xFor(i)},${yFor(t.value)}`).join(' ')
   const dots = timeline.map((t, i) => `
@@ -4013,7 +4280,8 @@ function buildProgressGraphSvg(timeline) {
   const labels = timeline.map((t, i) => `
     <text x="${xFor(i)}" y="${height - 6}" font-size="9" fill="#6B6558" text-anchor="middle">${t.label}</text>
   `).join('')
-  const gridLines = [0, 25, 50, 75, 100].map((v) => `
+  const gridStep = maxValue / 4
+  const gridLines = [0, 1, 2, 3, 4].map((i) => Math.round(i * gridStep * 10) / 10).map((v) => `
     <line x1="${padding.left}" y1="${yFor(v)}" x2="${width - padding.right}" y2="${yFor(v)}" stroke="#E4DFD1" stroke-width="1" />
     <text x="${padding.left - 6}" y="${yFor(v) + 3}" font-size="8" fill="#6B6558" text-anchor="end">${v}</text>
   `).join('')
@@ -5053,13 +5321,20 @@ function buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved,
 }
 
 function PerformanceTrackScreen() {
+  const { scale: gradeScale } = useGradeScale()
+  const { scale: cbcScale } = useCbcScale()
   const [cohort, setCohort] = useState('form_4')
   const [exams, setExams] = useState([])
   const [selectedExamId, setSelectedExamId] = useState('')
   const [rankings, setRankings] = useState([])
   const [mostImproved, setMostImproved] = useState([])
+  const [subjectMeans, setSubjectMeans] = useState([]) // [{ subjectId, name, meanPoints, grade, count }]
+  const [classMean, setClassMean] = useState(null) // { points, grade }
   const [loading, setLoading] = useState(false)
   const isNarrow = useIsNarrow()
+  const isCbc = cohort === 'grade_10'
+  const scale = isCbc ? cbcScale : gradeScale
+  const maxScalePoints = Math.max(...scale.map((r) => r.points))
 
   useEffect(() => {
     supabase.from('exams').select('*').order('order_index', { ascending: false }).then(({ data }) => {
@@ -5091,6 +5366,43 @@ function PerformanceTrackScreen() {
       .filter((r) => r.student)
       .sort((a, b) => a.rnk - b.rnk)
     setRankings(currentRanked)
+
+    // Compiled subject means + overall class mean: every subject actually
+    // marked for this cohort/exam, averaged, then averaged again across
+    // subjects — "all the subject performance compiled into a class mean".
+    const cohortStudentIds = (students || []).map((s) => s.id)
+    if (cohortStudentIds.length > 0) {
+      const { data: examMarks } = await supabase
+        .from('marks').select('score, subject_id, subjects(name)')
+        .eq('exam_id', selectedExamId).in('student_id', cohortStudentIds)
+      const bySubject = {}
+      ;(examMarks || []).forEach((m) => {
+        if (m.score === null || m.score === undefined || !m.subjects?.name) return
+        const key = m.subject_id
+        if (!bySubject[key]) bySubject[key] = { name: m.subjects.name, scores: [] }
+        bySubject[key].scores.push(m.score)
+      })
+      const means = Object.entries(bySubject).map(([subjectId, v]) => {
+        const mp = meanPoints(v.scores, scale, isCbc)
+        return {
+          subjectId,
+          name: v.name,
+          meanPoints: mp !== null ? Math.round(mp * 100) / 100 : 0,
+          grade: mp !== null ? gradeForMeanPoints(mp, scale) : null,
+          count: v.scores.length,
+        }
+      }).sort((a, b) => b.meanPoints - a.meanPoints)
+      setSubjectMeans(means)
+      if (means.length > 0) {
+        const classMp = means.reduce((a, b) => a + b.meanPoints, 0) / means.length
+        setClassMean({ points: Math.round(classMp * 100) / 100, grade: gradeForMeanPoints(classMp, scale) })
+      } else {
+        setClassMean(null)
+      }
+    } else {
+      setSubjectMeans([])
+      setClassMean(null)
+    }
 
     if (prevExam) {
       const { data: previous } = await supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: prevExam.id })
@@ -5203,6 +5515,38 @@ function PerformanceTrackScreen() {
 
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
         <>
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <div style={sectionLabel}>Subject Means</div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 11, color: COLORS.muted, fontWeight: 700, textTransform: 'uppercase' }}>Class Mean</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: COLORS.accent }}>{classMean !== null ? `${classMean.grade} (${classMean.points})` : '—'}</div>
+              </div>
+            </div>
+            {subjectMeans.length === 0 ? (
+              <div style={{ textAlign: 'center', color: COLORS.muted, padding: 20, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+                No marks recorded for this cohort/exam yet.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {subjectMeans.map((sm) => {
+                  const pct = maxScalePoints > 0 ? Math.max(0, Math.min(100, (sm.meanPoints / maxScalePoints) * 100)) : 0
+                  return (
+                    <div key={sm.subjectId} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12.5, width: 130, flexShrink: 0 }}>{sm.name}</span>
+                      <div style={{ flex: 1, background: COLORS.ruleLight, borderRadius: 4, overflow: 'hidden', height: 14 }}>
+                        <div style={{ width: `${pct}%`, background: COLORS.accent, height: '100%' }} />
+                      </div>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, width: 34, textAlign: 'right', flexShrink: 0 }}>{sm.grade}</span>
+                      <span style={{ fontSize: 11.5, color: COLORS.muted, width: 34, flexShrink: 0 }}>({sm.meanPoints})</span>
+                      <span style={{ fontSize: 11, color: COLORS.muted, width: 60, flexShrink: 0 }}>({sm.count} entered)</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
           {mostImproved.length > 0 && (
             <div style={{ marginBottom: 28 }}>
               <div style={sectionLabel}>🏆 Most Improved</div>
@@ -7003,7 +7347,7 @@ function AppContent() {
             {tab === 'Timetable' && <TimetableScreen />}
             {tab === 'Profiles' && <TeachersScreen currentUserId={profile.id} />}
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
-            {tab === 'Enrollment' && LEADERSHIP_TITLES.includes(profile.title) && <BulkEnrollmentScreen />}
+            {tab === 'Finance' && FINANCE_VISIBLE_TITLES.includes(profile.title) && <AdminFinanceScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} viewerTitle={profile.title} />}
             {tab === 'Settings' && <SettingsScreen />}

@@ -76,3 +76,38 @@ export function computeCbcTotal(subjectScores, scale = DEFAULT_CBC_SCALE) {
   const maxTotal = withScores.length * maxPoints
   return { total, maxTotal, subjectCount: withScores.length }
 }
+
+// ============================================================================
+// MEAN GRADES (subject means, class means, teacher's class-average trend)
+// A "mean" over a set of scores is NOT the average of the raw percentage
+// scores. Each score is converted to its grade points first, those points
+// are summed and divided by the count to get a mean points value, and THAT
+// value is looked up against the scale to get the mean grade — the same way
+// KNEC computes a subject/class mean grade.
+// ============================================================================
+
+// A single score's grade points on the given scale.
+export function pointsForScore(score, scale, isCbc = false) {
+  const label = isCbc ? cbcLevel(score, scale) : kcseGrade(score, scale)
+  return pointsForGrade(label, scale)
+}
+
+// Mean points for a list of raw scores: sum each score's points, divide by
+// count. Returns null if there are no valid scores.
+export function meanPoints(scores, scale, isCbc = false) {
+  const valid = (scores || []).filter((s) => s !== null && s !== undefined)
+  if (valid.length === 0) return null
+  const total = valid.reduce((sum, s) => sum + pointsForScore(s, scale, isCbc), 0)
+  return total / valid.length
+}
+
+// Grade label for a mean points value. Mirrors kcseGrade/cbcLevel's
+// threshold logic (scale sorted descending by min_score, which is also
+// descending by points) but keys off points instead of raw score.
+export function gradeForMeanPoints(points, scale) {
+  if (points === null || points === undefined) return null
+  for (const row of scale) {
+    if (points >= row.points) return row.label
+  }
+  return scale[scale.length - 1]?.label ?? null
+}
