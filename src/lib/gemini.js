@@ -1,5 +1,8 @@
 import { supabase } from './supabaseClient'
-const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY
+
+// NOTE: The Groq key no longer lives here or anywhere in client-side code.
+// All calls go through the /api/generate-text serverless function, which
+// holds GROQ_API_KEY server-side only. See /api/generate-text.js.
 
 // Phrases that show up when the model leaks its own instructions/reasoning
 // instead of answering (common with reasoning models like gpt-oss-20b when
@@ -46,40 +49,30 @@ function looksLeaked(text, maxWords) {
   return false
 }
 
-// Calls Groq's chat completions endpoint once and returns the cleaned text,
-// preferring `message.content` and only falling back to `message.reasoning`
-// (gpt-oss-20b sometimes puts the whole answer there) as a last resort.
+// Calls our own /api/generate-text serverless function (which itself calls
+// Groq's chat completions endpoint using a server-side-only key) and
+// returns the cleaned text, preferring `message.content` and only falling
+// back to `message.reasoning` (gpt-oss-20b sometimes puts the whole answer
+// there) as a last resort.
 async function callGroqOnce(promptText, { temperature, maxTokens }) {
-  const url = 'https://api.groq.com/openai/v1/chat/completions'
-  const response = await fetch(url, {
+  const response = await fetch('/api/generate-text', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-20b',
-      messages: [{ role: 'user', content: promptText }],
-      temperature,
-      max_tokens: maxTokens,
-    }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ promptText, temperature, maxTokens }),
   })
+  const result = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const errData = await response.json().catch(() => ({}))
-    if (response.status === 429) {
-      throw new Error('Groq rate limit reached. Wait a moment and try again.')
-    }
-    throw new Error(errData.error?.message || `Generation failed with status ${response.status}`)
+    throw new Error(result.error || `Generation failed with status ${response.status}`)
   }
-  const result = await response.json()
   const message = result?.choices?.[0]?.message || {}
   return cleanText(message.content) || cleanText(message.reasoning)
 }
 
-// Calls Groq and retries (a few times, with a slightly higher temperature
-// each pass to break out of a repeating bad pattern) until we get text that
-// doesn't look like leaked instructions/reasoning, or gives up with a clear
-// error instead of silently returning garbage.
+// Calls Groq (via our serverless function) and retries (a few times, with a
+// slightly higher temperature each pass to break out of a repeating bad
+// pattern) until we get text that doesn't look like leaked
+// instructions/reasoning, or gives up with a clear error instead of
+// silently returning garbage.
 async function generateValidatedText(promptText, { maxWords, temperature = 0.3, maxTokens = 300, maxAttempts = 3 }) {
   let lastAttempt = ''
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -139,9 +132,8 @@ export async function getAutomatedRemarksCount() {
   return error ? 0 : (count ?? 0)
 }
 /**
- * Calls Groq's Llama 3.1 8B Instant model to generate a white-labeled
- * student remark. Groq's API is OpenAI-compatible, so this uses the
- * standard /chat/completions shape rather than Gemini's format.
+ * Calls Groq's model (via the /api/generate-text serverless function) to
+ * generate a white-labeled student remark. The key stays server-side.
  *
  * @param {Object} student - Student metadata object
  * @param {Array} currentGrades - Current exam subject scores
@@ -149,9 +141,6 @@ export async function getAutomatedRemarksCount() {
  * @returns {Promise<string>}
  */
 export async function generateStudentRemark(student, currentGrades = [], previousGrades = []) {
-  if (!GROQ_API_KEY) {
-    throw new Error('Groq API key is missing. Please set VITE_GROQ_API_KEY in your .env file.')
-  }
   const enabled = await isAutomatedRemarksEnabled()
   if (!enabled) {
     throw new Error('Automated remarks generation is currently disabled globally in Admin Settings.')
@@ -201,9 +190,6 @@ Instructions:
  * @returns {Promise<string>}
  */
 export async function generateReportComment(student, subjectRows, aggregate, position, outOf, commentType) {
-  if (!GROQ_API_KEY) {
-    throw new Error('Groq API key is missing. Please set VITE_GROQ_API_KEY in your .env file.')
-  }
   const enabled = await isAutomatedRemarksEnabled()
   if (!enabled) {
     throw new Error('Automated remarks generation is currently disabled globally in Admin Settings.')
