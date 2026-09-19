@@ -335,9 +335,9 @@ const TITLE_LIMITS = { 'Principal': 1, 'Deputy Principal': 2, 'Dean of Studies':
 // any subject and class directly, without self-assigning a teacher row first.
 const LEADERSHIP_TITLES = Object.keys(TITLE_LIMITS)
 // Non-teaching-staff (finance) accounts and their approval requests are
-// financial/administrative matters — only these titles should see them.
-// Dean of Studies is academic-focused and deliberately excluded.
-const FINANCE_VISIBLE_TITLES = ['Principal', 'Deputy Principal', 'School Manager', 'Director']
+// financial/administrative matters. Visible to every leadership title,
+// Dean of Studies included.
+const FINANCE_VISIBLE_TITLES = ['Principal', 'Deputy Principal', 'Dean of Studies', 'School Manager', 'Director']
 // Of those, School Manager and Director are purely administrative — they
 // don't teach a subject/class, so the Profiles screen shouldn't offer to
 // assign them one.
@@ -529,6 +529,7 @@ function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const tabs = [
     'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
     ...(isLeadership ? ['Enter Marks'] : []),
+    'Graduation',
     ...(canSeeFinance ? ['Finance'] : []),
     'My Teaching', 'Approvals', 'Settings',
   ]
@@ -656,7 +657,7 @@ function DashboardScreen({ onNavigate }) {
   async function loadCounts() {
     setLoading(true)
     const [{ count: studentCount }, { count: pendingCount }, { count: examCount }, { data: teacherRows }] = await Promise.all([
-      supabase.from('students').select('*', { count: 'exact', head: true }),
+      supabase.from('students').select('*', { count: 'exact', head: true }).is('graduated_at', null),
       supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       supabase.from('exams').select('*', { count: 'exact', head: true }),
       // Fetched (not head-counted) so we can apply the same "actually
@@ -699,7 +700,10 @@ function ApprovalsScreen({ currentUserId, viewerTitle }) {
   const [pendingAssignments, setPendingAssignments] = useState([])
   const [loadingAssignments, setLoadingAssignments] = useState(true)
   const [actioningAssignmentId, setActioningAssignmentId] = useState(null)
-  const canSeeFinance = FINANCE_VISIBLE_TITLES.includes(viewerTitle)
+  // Untitled admin accounts (no leadership title) are the top-level system
+  // admins, so they must see non-teaching-staff requests too; otherwise those
+  // signups are counted on the Dashboard but missing from this list.
+  const canSeeFinance = !viewerTitle || FINANCE_VISIBLE_TITLES.includes(viewerTitle)
 
   useEffect(() => {
     loadPending()
@@ -921,7 +925,14 @@ function AddStudentModal({ onClose, onSaved }) {
   const isForm34 = cohort === 'form_3' || cohort === 'form_4'
   const entranceType = cohort === 'grade_10' ? 'KJSEA' : 'KCPE'
   const entranceMax = cohort === 'grade_10' ? 72 : 500
-  const canSave = fullName.trim() && admissionNo.trim() && (!isForm34 || (electives.length > 0 && oneOfChoice))
+  // The technical one-of (Computer Studies/Business Studies/Agriculture) is
+  // optional — some students take none of the three — so it's not part of
+  // the save gate. Only the Physics/Biology, Geography/History pick is required.
+  const canSave = fullName.trim() && admissionNo.trim() && (!isForm34 || electives.length > 0)
+
+  function selectOneOf(subject) {
+    setOneOfChoice((prev) => (prev === subject ? '' : subject))
+  }
 
   async function handleSave() {
     setSaving(true)
@@ -1039,10 +1050,10 @@ function AddStudentModal({ onClose, onSaved }) {
                 <button key={s} onClick={() => toggleElective(s)} style={pillBtn(electives.includes(s))}>{s}</button>
               ))}
             </div>
-            <div style={sectionLabel}>Choose one: Computer, Business, or Agriculture</div>
+            <div style={sectionLabel}>Technical subject (optional) — Computer Studies, Business Studies, or Agriculture; leave unselected if they take none</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
               {ONE_OF_GROUP.map((s) => (
-                <button key={s} onClick={() => setOneOfChoice(s)} style={pillBtn(oneOfChoice === s)}>{s}</button>
+                <button key={s} onClick={() => selectOneOf(s)} style={pillBtn(oneOfChoice === s)}>{s}</button>
               ))}
             </div>
             <button onClick={() => toggleElective('CRE')} style={{ ...pillBtn(electives.includes('CRE')), marginBottom: 14 }}>+ CRE (optional)</button>
@@ -1364,7 +1375,8 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
     setGrade10Electives((prev) => (prev.includes(subject) ? prev.filter((s) => s !== subject) : [...prev, subject]))
   }
 
-  const canSave = fullName.trim() && admissionNo.trim() && (!isForm34 || (electives.length > 0 && oneOfChoice))
+  // Technical one-of is optional here too — see AddStudentModal for why.
+  const canSave = fullName.trim() && admissionNo.trim() && (!isForm34 || electives.length > 0)
 
   async function handleSave() {
     setSaving(true)
@@ -1372,6 +1384,7 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
     const { error: studentError } = await supabase.from('students').update({
       full_name: fullName.trim(),
       admission_no: admissionNo.trim(),
+      entrance_type: entranceScore === '' ? null : (isGrade10 ? 'KJSEA' : 'KCPE'),
       entrance_score: entranceScore === '' ? null : Number(entranceScore),
       entrance_max: entranceMax === '' ? null : Number(entranceMax),
       parent_name: parentName.trim() || null,
@@ -1483,9 +1496,9 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
                   {COMPULSORY_84.map((s) => <span key={s} style={pillStatic}>{s}</span>)}
                 </div>
-                <label style={fieldLabel}>One of Computer Studies / Business Studies / Agriculture
+                <label style={fieldLabel}>Technical subject (optional) — Computer Studies / Business Studies / Agriculture
                   <select value={oneOfChoice} onChange={(e) => setOneOfChoice(e.target.value)} style={input}>
-                    <option value="">Select…</option>
+                    <option value="">None</option>
                     {ONE_OF_GROUP.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </label>
@@ -1529,7 +1542,7 @@ function EditStudentModal({ student, allSubjects, onClose, onSaved }) {
 // STUDENT DETAILS — read-only view of a student's full record (medical,
 // educational track, extracurricular, notes) surfaced from the Students list.
 // ============================================================================
-function StudentDetailsModal({ student, onClose }) {
+function StudentDetailsModal({ student, onClose, onEdit }) {
   const Field = ({ label, value, multiline }) => (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 11, color: COLORS.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 3 }}>{label}</div>
@@ -1557,8 +1570,80 @@ function StudentDetailsModal({ student, onClose }) {
           <Field label="Extracurricular Activities" value={student.extracurricular} multiline />
           <Field label="Notes" value={student.general_notes} multiline />
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          {onEdit && <button onClick={onEdit} style={btn}>Edit details</button>}
           <button onClick={onClose} style={secondaryBtn}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Finance/Bursar edit form: only contact, medical, activities and notes.
+// Name, admission number, class and educational track stay read-only here.
+// Saves through the finance_update_student_details() database function.
+function FinanceEditDetailsModal({ student, onClose, onSaved }) {
+  const { notify } = useNotify()
+  const [parentName, setParentName] = useState(student.parent_name ?? '')
+  const [parentPhone, setParentPhone] = useState(student.parent_phone ?? '')
+  const [medicalNotes, setMedicalNotes] = useState(student.medical_notes ?? '')
+  const [extracurricular, setExtracurricular] = useState(student.extracurricular ?? '')
+  const [generalNotes, setGeneralNotes] = useState(student.general_notes ?? '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const area = { ...input, minHeight: 70, fontFamily: 'inherit', resize: 'vertical' }
+
+  async function handleSave() {
+    setSaving(true)
+    setError('')
+    const updates = {
+      parent_name: parentName.trim() || null,
+      parent_phone: parentPhone.trim() || null,
+      medical_notes: medicalNotes.trim() || null,
+      extracurricular: extracurricular.trim() || null,
+      general_notes: generalNotes.trim() || null,
+    }
+    const { error: rpcError } = await supabase.rpc('finance_update_student_details', {
+      p_student_id: student.id,
+      p_parent_name: updates.parent_name,
+      p_parent_phone: updates.parent_phone,
+      p_medical_notes: updates.medical_notes,
+      p_extracurricular: updates.extracurricular,
+      p_general_notes: updates.general_notes,
+    })
+    setSaving(false)
+    if (rpcError) { setError(rpcError.message); return }
+    notify('Student details updated.')
+    onSaved({ ...student, ...updates })
+  }
+
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(520px, 94vw)', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <h3>Edit — {student.full_name}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <p style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 14 }}>{student.admission_no}</p>
+        <label style={fieldLabel}>Parent / Guardian
+          <input value={parentName} onChange={(e) => setParentName(e.target.value)} style={input} />
+        </label>
+        <label style={fieldLabel}>Parent Phone
+          <input value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} style={input} />
+        </label>
+        <label style={fieldLabel}>Medical (conditions / allergies)
+          <textarea value={medicalNotes} onChange={(e) => setMedicalNotes(e.target.value)} style={area} />
+        </label>
+        <label style={fieldLabel}>Extracurricular Activities
+          <textarea value={extracurricular} onChange={(e) => setExtracurricular(e.target.value)} style={area} />
+        </label>
+        <label style={fieldLabel}>Notes
+          <textarea value={generalNotes} onChange={(e) => setGeneralNotes(e.target.value)} style={area} />
+        </label>
+        {error && <p style={errorText}>{error}</p>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          <button onClick={onClose} style={secondaryBtn}>Cancel</button>
+          <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save'}</button>
         </div>
       </div>
     </div>
@@ -1712,7 +1797,7 @@ function StudentsScreen() {
 
   async function loadStudents() {
     setLoading(true)
-    let query = supabase.from('students').select('*').order('created_at', { ascending: false })
+    let query = supabase.from('students').select('*').is('graduated_at', null).order('created_at', { ascending: false })
     if (cohortFilter !== 'all') {
       query = query.eq('cohort', cohortFilter)
     }
@@ -1905,7 +1990,7 @@ function ExamMarksOverview({ exam, onBack }) {
 
   async function loadOverview() {
     setLoading(true)
-    const { data: studentData } = await supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort).order('full_name')
+    const { data: studentData } = await supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort).is('graduated_at', null).order('full_name')
     setStudents(studentData || [])
     const studentIds = (studentData || []).map((s) => s.id)
 
@@ -2565,7 +2650,7 @@ function MarksEntryContent({ teacherId, adminMode = false }) {
     const assignment = currentAssignment()
     if (!assignment) { setLoading(false); return }
     const { data: classStudents } = await supabase
-      .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
+      .from('students').select('*').eq('cohort', assignment.class_label).is('graduated_at', null).order('full_name')
     const classStudentIds = (classStudents || []).map((s) => s.id)
     const { data: allEnrollmentRows } = await supabase
       .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
@@ -2958,7 +3043,7 @@ function AnalysisScreen({ teacherId, adminMode = false, manualAssignment = null 
     const assignment = currentAssignment()
     if (!assignment) { setStudents([]); setMarksIndex({}); setLoading(false); return }
     const { data: classStudents } = await supabase
-      .from('students').select('*').eq('cohort', assignment.class_label).order('full_name')
+      .from('students').select('*').eq('cohort', assignment.class_label).is('graduated_at', null).order('full_name')
     const classStudentIds = (classStudents || []).map((s) => s.id)
     const { data: allEnrollmentRows } = await supabase
       .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
@@ -3158,11 +3243,13 @@ function MarksEntryScreen({ teacherId, teacherName, onLogout }) {
         <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
           <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
           <button onClick={() => setView('analysis')} style={view === 'analysis' ? btn : secondaryBtn}>Analysis</button>
+          <button onClick={() => setView('quizzes')} style={view === 'quizzes' ? btn : secondaryBtn}>Quizzes</button>
           <button onClick={() => setView('attendance')} style={view === 'attendance' ? btn : secondaryBtn}>Attendance</button>
           <button onClick={() => setView('timetable')} style={view === 'timetable' ? btn : secondaryBtn}>My Timetable</button>
         </div>
         {view === 'marks' && <MarksEntryContent teacherId={teacherId} />}
         {view === 'analysis' && <AnalysisScreen teacherId={teacherId} />}
+        {view === 'quizzes' && <QuizzesScreen teacherId={teacherId} />}
         {view === 'attendance' && <TeacherAttendanceScreen teacherId={teacherId} />}
         {view === 'timetable' && <TeacherTimetableScreen teacherId={teacherId} />}
       </div>
@@ -3185,9 +3272,11 @@ function AdminTeachingScreen({ profile }) {
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
         <button onClick={() => setView('marks')} style={view === 'marks' ? btn : secondaryBtn}>Marks Entry</button>
         <button onClick={() => setView('analysis')} style={view === 'analysis' ? btn : secondaryBtn}>Analysis</button>
+        <button onClick={() => setView('quizzes')} style={view === 'quizzes' ? btn : secondaryBtn}>Quizzes</button>
       </div>
       {view === 'marks' && <MarksEntryContent teacherId={profile.id} />}
       {view === 'analysis' && <AnalysisScreen teacherId={profile.id} />}
+      {view === 'quizzes' && <QuizzesScreen teacherId={profile.id} />}
     </div>
   )
 }
@@ -4012,14 +4101,17 @@ function PocketMoneyScreen({ profile }) {
 }
 
 // ============================================================================
-// FINANCE: basic student lookup (names/admission numbers only — no marks,
-// no other admin data)
+// FINANCE: student lookup with a read-only details view (parent contact,
+// medical conditions/allergies, notes) — no marks or performance data.
 // ============================================================================
 function FinanceStudentLookup() {
   const [query, setQuery] = useState('')
   const [cohortFilter, setCohortFilter] = useState('all')
   const [students, setStudents] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [viewingStudent, setViewingStudent] = useState(null)
+  const [editingStudent, setEditingStudent] = useState(null)
 
   const cohortOptions = [
     { value: 'all', label: 'All Classes' },
@@ -4029,8 +4121,14 @@ function FinanceStudentLookup() {
   ]
 
   useEffect(() => {
-    supabase.from('students').select('id, full_name, admission_no, cohort').order('full_name')
-      .then(({ data }) => { setStudents(data || []); setLoading(false) })
+    supabase.from('students')
+      .select('id, full_name, admission_no, cohort, pathway, parent_name, parent_phone, educational_track, medical_notes, extracurricular, general_notes')
+      .order('full_name')
+      .then(({ data, error }) => {
+        if (error) setLoadError(`Couldn't load students: ${error.message}`)
+        setStudents(data || [])
+        setLoading(false)
+      })
   }, [])
 
   const filtered = students.filter((s) => {
@@ -4049,22 +4147,44 @@ function FinanceStudentLookup() {
           {cohortOptions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
         </select>
       </div>
+      {loadError && <p style={errorText}>{loadError}</p>}
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
         <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead><tr><th style={th}>Full Name</th><th style={th}>Admission No.</th><th style={th}>Class</th></tr></thead>
+          <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead><tr><th style={th}>Full Name</th><th style={th}>Admission No.</th><th style={th}>Class</th><th style={th}>Medical / Allergies</th></tr></thead>
             <tbody>
               {filtered.map((s) => (
-                <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                <tr key={s.id} onClick={() => setViewingStudent(s)} style={{ borderTop: `1px solid ${COLORS.ruleLight}`, cursor: 'pointer' }}>
                   <td style={td}>{s.full_name}</td>
                   <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
                   <td style={td}>{CLASS_OPTIONS.find((c) => c.value === s.cohort)?.label || s.cohort}</td>
+                  <td style={{ ...td, color: s.medical_notes ? COLORS.ink : COLORS.muted, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.medical_notes || ''}>
+                    {s.medical_notes || '—'}
+                  </td>
                 </tr>
               ))}
-              {filtered.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No students found.</td></tr>}
+              {filtered.length === 0 && <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 16 }}>No students found.</td></tr>}
             </tbody>
           </table>
         </div>
+      )}
+      {viewingStudent && (
+        <StudentDetailsModal
+          student={viewingStudent}
+          onClose={() => setViewingStudent(null)}
+          onEdit={() => { setEditingStudent(viewingStudent); setViewingStudent(null) }}
+        />
+      )}
+      {editingStudent && (
+        <FinanceEditDetailsModal
+          student={editingStudent}
+          onClose={() => setEditingStudent(null)}
+          onSaved={(updated) => {
+            setStudents((prev) => prev.map((x) => (x.id === updated.id ? updated : x)))
+            setEditingStudent(null)
+            setViewingStudent(updated)
+          }}
+        />
       )}
     </div>
   )
@@ -4141,6 +4261,912 @@ function AdminMarksEntryScreen({ profile }) {
   return (
     <div style={pageWrap}>
       <MarksEntryContent teacherId={profile.id} adminMode />
+    </div>
+  )
+}
+
+// ============================================================================
+// WEEKLY QUIZZES — lightweight, separate from the Exams/Reports system.
+// Quizzes are scored out of a per-quiz max (not necessarily 100), tracked
+// per subject+class, and used ONLY for trend/analysis — they never feed the
+// KCSE/CBC aggregate, ranking, or report cards.
+//
+// Requires two Supabase tables (create via the SQL editor):
+//
+// create table quizzes (
+//   id uuid primary key default gen_random_uuid(),
+//   subject_id uuid references subjects(id),
+//   class_label text not null,
+//   title text not null,
+//   quiz_date date not null default current_date,
+//   max_score numeric not null default 10,
+//   order_index int not null default 1,
+//   created_by uuid references profiles(id),
+//   created_at timestamptz default now()
+// );
+//
+// create table quiz_scores (
+//   id uuid primary key default gen_random_uuid(),
+//   quiz_id uuid references quizzes(id) on delete cascade,
+//   student_id uuid references students(id) on delete cascade,
+//   score numeric not null,
+//   entered_by uuid references profiles(id),
+//   created_at timestamptz default now(),
+//   unique (quiz_id, student_id)
+// );
+// ============================================================================
+function NewQuizModal({ assignment, teacherId, onClose, onCreated }) {
+  const { notify } = useNotify()
+  const [title, setTitle] = useState('')
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [maxScore, setMaxScore] = useState('10')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSave() {
+    if (!title.trim()) { setError('Give the quiz a name.'); return }
+    setSaving(true)
+    setError('')
+    const { data: existing } = await supabase
+      .from('quizzes').select('order_index')
+      .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label)
+      .order('order_index', { ascending: false }).limit(1)
+    const nextOrder = existing && existing.length > 0 ? existing[0].order_index + 1 : 1
+    const { data, error: insertError } = await supabase.from('quizzes').insert({
+      subject_id: assignment.subject_id, class_label: assignment.class_label,
+      title: title.trim(), quiz_date: date, max_score: Number(maxScore) || 10,
+      order_index: nextOrder, created_by: teacherId,
+    }).select().single()
+    setSaving(false)
+    if (insertError) { setError(insertError.message); return }
+    notify('Quiz created.')
+    onCreated(data.id)
+  }
+
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(380px, 94vw)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3>New Quiz</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <label style={fieldLabel}>Title
+          <input value={title} onChange={(e) => setTitle(e.target.value)} style={input} placeholder="e.g. Week 3 Quiz" />
+        </label>
+        <label style={fieldLabel}>Date
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={input} />
+        </label>
+        <label style={fieldLabel}>Out of (max score)
+          <input type="number" min={1} value={maxScore} onChange={(e) => setMaxScore(e.target.value)} style={input} />
+        </label>
+        {error && <p style={errorText}>{error}</p>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+          <button onClick={onClose} style={secondaryBtn}>Cancel</button>
+          <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Create'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function QuizEntryPanel({ assignment, teacherId }) {
+  const { notify } = useNotify()
+  const [quizzes, setQuizzes] = useState([])
+  const [selectedQuizId, setSelectedQuizId] = useState('')
+  const [students, setStudents] = useState([])
+  const [scoresByStudent, setScoresByStudent] = useState({})
+  const [drafts, setDrafts] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [showNew, setShowNew] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [savedMsg, setSavedMsg] = useState('')
+  const isNarrow = useIsNarrow()
+
+  useEffect(() => { loadQuizzes() }, [assignment.subject_id, assignment.class_label])
+  useEffect(() => { if (selectedQuizId) loadStudentsAndScores() }, [selectedQuizId])
+
+  async function loadQuizzes() {
+    setLoading(true)
+    const { data } = await supabase
+      .from('quizzes').select('*')
+      .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label)
+      .order('quiz_date', { ascending: false })
+    setQuizzes(data || [])
+    if (data && data.length > 0) setSelectedQuizId(data[0].id)
+    else { setSelectedQuizId(''); setStudents([]); setScoresByStudent({}); setLoading(false) }
+  }
+
+  async function loadStudentsAndScores() {
+    setLoading(true)
+    const { data: classStudents } = await supabase.from('students').select('*').eq('cohort', assignment.class_label).is('graduated_at', null).order('full_name')
+    const classStudentIds = (classStudents || []).map((s) => s.id)
+    const { data: allEnrollmentRows } = await supabase
+      .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
+    const enrolledForSubject = new Set(
+      (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
+    )
+    const subjectName = assignment.subjects?.name
+    const isElectiveSubject =
+      ONE_OF_GROUP.includes(subjectName) ||
+      EXCLUSION_PAIRS.some((pair) => pair.includes(subjectName)) ||
+      GRADE10_ELECTIVE_MENU.includes(subjectName)
+    const studentData = (classStudents || []).filter((s) => (isElectiveSubject ? enrolledForSubject.has(s.id) : true))
+    setStudents(studentData)
+
+    const { data: scoreData } = await supabase.from('quiz_scores').select('*').eq('quiz_id', selectedQuizId)
+    const byStudent = {}
+    ;(scoreData || []).forEach((s) => { byStudent[s.student_id] = s })
+    setScoresByStudent(byStudent)
+    setDrafts({})
+    setLoading(false)
+  }
+
+  function updateDraft(studentId, value) {
+    setDrafts((prev) => ({ ...prev, [studentId]: value }))
+  }
+
+  async function saveAll() {
+    setSaving(true)
+    setSavedMsg('')
+    const rows = Object.entries(drafts)
+      .filter(([, v]) => v !== '' && v !== undefined)
+      .map(([studentId, value]) => ({
+        quiz_id: selectedQuizId, student_id: studentId, score: Number(value), entered_by: teacherId,
+      }))
+    if (rows.length === 0) { setSaving(false); return }
+    const { error } = await supabase.from('quiz_scores').upsert(rows, { onConflict: 'quiz_id,student_id' })
+    if (error) { notify(`Couldn't save: ${error.message}`, 'error') }
+    else {
+      setSavedMsg(`Saved ${rows.length} score${rows.length === 1 ? '' : 's'} at ${new Date().toLocaleTimeString()}`)
+      loadStudentsAndScores()
+    }
+    setSaving(false)
+  }
+
+  const selectedQuiz = quizzes.find((q) => q.id === selectedQuizId)
+  const enteredCount = students.filter((s) => scoresByStudent[s.id] || drafts[s.id] !== undefined).length
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        <label style={fieldLabel}>Quiz
+          <select value={selectedQuizId} onChange={(e) => setSelectedQuizId(e.target.value)} style={{ ...input, minWidth: 220 }}>
+            {quizzes.length === 0 && <option value="">No quizzes yet</option>}
+            {quizzes.map((q) => <option key={q.id} value={q.id}>{q.title} — {new Date(q.quiz_date).toLocaleDateString()} (/{q.max_score})</option>)}
+          </select>
+        </label>
+        <button onClick={() => setShowNew(true)} style={secondaryBtn}>+ New Quiz</button>
+      </div>
+
+      {!selectedQuiz ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No quizzes yet for this subject/class — create one to start entering scores.
+        </div>
+      ) : loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <>
+          <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 10 }}>{enteredCount} / {students.length} entered · out of {selectedQuiz.max_score}</div>
+          {isNarrow ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {students.map((s) => {
+                const existing = scoresByStudent[s.id]
+                return (
+                  <div key={s.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{s.full_name}</div>
+                      <div style={{ fontSize: 11, color: COLORS.muted }}>{s.admission_no}</div>
+                    </div>
+                    <input
+                      type="number" min={0} max={selectedQuiz.max_score}
+                      defaultValue={existing ? existing.score : ''}
+                      onChange={(e) => updateDraft(s.id, e.target.value)}
+                      style={{ width: 70, padding: '8px', textAlign: 'center', border: `1px solid ${COLORS.rule}`, borderRadius: 4 }}
+                    />
+                  </div>
+                )
+              })}
+              {students.length === 0 && (
+                <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+                  No students in this class yet.
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+              <table style={{ width: '100%', minWidth: 400, borderCollapse: 'collapse' }}>
+                <thead><tr><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={{ ...th, textAlign: 'center' }}>Score (/{selectedQuiz.max_score})</th></tr></thead>
+                <tbody>
+                  {students.map((s) => {
+                    const existing = scoresByStudent[s.id]
+                    return (
+                      <tr key={s.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                        <td style={td}>{s.full_name}</td>
+                        <td style={{ ...td, color: COLORS.muted }}>{s.admission_no}</td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          <input
+                            type="number" min={0} max={selectedQuiz.max_score}
+                            defaultValue={existing ? existing.score : ''}
+                            onChange={(e) => updateDraft(s.id, e.target.value)}
+                            style={{ width: 64, padding: '6px 8px', textAlign: 'center', border: `1px solid ${COLORS.rule}`, borderRadius: 4 }}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {students.length === 0 && <tr><td colSpan={3} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No students in this class yet.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 }}>
+            <span style={{ fontSize: 12, color: COLORS.muted }}>{savedMsg || 'Unsaved changes are only committed once you save.'}</span>
+            <button onClick={saveAll} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Save All'}</button>
+          </div>
+        </>
+      )}
+
+      {showNew && (
+        <NewQuizModal
+          assignment={assignment} teacherId={teacherId}
+          onClose={() => setShowNew(false)}
+          onCreated={(id) => { setShowNew(false); loadQuizzes(); setSelectedQuizId(id) }}
+        />
+      )}
+    </>
+  )
+}
+
+function QuizAnalysisPanel({ assignment }) {
+  const [quizzes, setQuizzes] = useState([])
+  const [students, setStudents] = useState([])
+  const [scoresIndex, setScoresIndex] = useState({}) // `${quizId}:${studentId}` -> { score, max }
+  const [selectedStudentId, setSelectedStudentId] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => { loadData() }, [assignment.subject_id, assignment.class_label])
+
+  async function loadData() {
+    setLoading(true)
+    const { data: quizData } = await supabase
+      .from('quizzes').select('*')
+      .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label)
+      .order('quiz_date', { ascending: true })
+    const quizList = quizData || []
+    setQuizzes(quizList)
+
+    const { data: classStudents } = await supabase.from('students').select('*').eq('cohort', assignment.class_label).is('graduated_at', null).order('full_name')
+    const classStudentIds = (classStudents || []).map((s) => s.id)
+    const { data: allEnrollmentRows } = await supabase
+      .from('student_subjects').select('student_id, subject_id').in('student_id', classStudentIds)
+    const enrolledForSubject = new Set(
+      (allEnrollmentRows || []).filter((r) => r.subject_id === assignment.subject_id).map((r) => r.student_id)
+    )
+    const subjectName = assignment.subjects?.name
+    const isElectiveSubject =
+      ONE_OF_GROUP.includes(subjectName) ||
+      EXCLUSION_PAIRS.some((pair) => pair.includes(subjectName)) ||
+      GRADE10_ELECTIVE_MENU.includes(subjectName)
+    const eligibleStudents = (classStudents || []).filter((s) => (isElectiveSubject ? enrolledForSubject.has(s.id) : true))
+    setStudents(eligibleStudents)
+    if (eligibleStudents.length > 0) {
+      setSelectedStudentId((prev) => (eligibleStudents.some((s) => s.id === prev) ? prev : eligibleStudents[0].id))
+    } else {
+      setSelectedStudentId('')
+    }
+
+    const quizIds = quizList.map((q) => q.id)
+    const { data: scoreData } = quizIds.length > 0
+      ? await supabase.from('quiz_scores').select('*').in('quiz_id', quizIds)
+      : { data: [] }
+    const maxByQuiz = Object.fromEntries(quizList.map((q) => [q.id, q.max_score]))
+    const index = {}
+    ;(scoreData || []).forEach((s) => { index[`${s.quiz_id}:${s.student_id}`] = { score: s.score, max: maxByQuiz[s.quiz_id] } })
+    setScoresIndex(index)
+    setLoading(false)
+  }
+
+  const classTrend = quizzes.map((q) => {
+    const pcts = students
+      .map((s) => scoresIndex[`${q.id}:${s.id}`])
+      .filter((v) => v !== undefined && v.max)
+      .map((v) => (v.score / v.max) * 100)
+    return { label: q.title, value: pcts.length > 0 ? Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 10) / 10 : null }
+  }).filter((t) => t.value !== null)
+
+  const latestQuiz = quizzes.length > 0 ? quizzes[quizzes.length - 1] : null
+  const latestScores = latestQuiz
+    ? students
+        .map((s) => ({ student: s, entry: scoresIndex[`${latestQuiz.id}:${s.id}`] }))
+        .filter((r) => r.entry)
+        .map((r) => ({ student: r.student, score: r.entry.score, max: r.entry.max, pct: (r.entry.score / r.entry.max) * 100 }))
+    : []
+  const ranked = [...latestScores].sort((a, b) => b.pct - a.pct)
+  const topPerformers = ranked.slice(0, 5)
+  const bottomPerformers = ranked.slice(-5).reverse()
+
+  const studentTrend = quizzes
+    .map((q) => {
+      const entry = scoresIndex[`${q.id}:${selectedStudentId}`]
+      return { label: q.title, value: entry ? Math.round((entry.score / entry.max) * 1000) / 10 : undefined }
+    })
+    .filter((t) => t.value !== undefined)
+
+  if (loading) return <p style={{ color: COLORS.muted }}>Loading...</p>
+
+  return (
+    <>
+      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={sectionLabel}>Quiz Average Trend</div>
+          {classTrend.length > 0 && (
+            <div style={{ fontSize: 18, fontWeight: 800, color: COLORS.accent }}>{classTrend[classTrend.length - 1].value}%</div>
+          )}
+        </div>
+        {classTrend.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: COLORS.muted }}>No quiz scores recorded yet.</p>
+        ) : (
+          <div dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(classTrend) }} />
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 16 }}>
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+          <div style={sectionLabel}>Top Performers{latestQuiz ? ` — ${latestQuiz.title}` : ''}</div>
+          {topPerformers.length === 0 ? <p style={{ fontSize: 12.5, color: COLORS.muted }}>No scores yet.</p> : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {topPerformers.map((r, i) => (
+                <div key={r.student.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                  <span>{i + 1}. {r.student.full_name}</span>
+                  <span style={{ fontWeight: 700 }}>{r.score}/{r.max}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+          <div style={sectionLabel}>Needs Attention{latestQuiz ? ` — ${latestQuiz.title}` : ''}</div>
+          {bottomPerformers.length === 0 ? <p style={{ fontSize: 12.5, color: COLORS.muted }}>No scores yet.</p> : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {bottomPerformers.map((r) => (
+                <div key={r.student.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                  <span>{r.student.full_name}</span>
+                  <span style={{ fontWeight: 700, color: COLORS.warn }}>{r.score}/{r.max}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+          <div style={sectionLabel}>Individual Student Progress</div>
+          <select value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)} style={{ ...input, maxWidth: 220 }}>
+            {students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}
+          </select>
+        </div>
+        {studentTrend.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: COLORS.muted }}>No quiz scores recorded yet for this student.</p>
+        ) : (
+          <div dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(studentTrend) }} />
+        )}
+      </div>
+    </>
+  )
+}
+
+// Main Quizzes screen: subject/class picker limited to the subjects THIS
+// teacher teaches (their approved assignments), then an Enter Scores /
+// Analysis toggle. Does NOT wrap itself in pageWrap — callers embed it
+// (see MarksEntryScreen, AdminTeachingScreen).
+function QuizzesScreen({ teacherId }) {
+  const [view, setView] = useState('entry') // 'entry' | 'analysis'
+  const [myAssignments, setMyAssignments] = useState([])
+  const [selectedAssignment, setSelectedAssignment] = useState('')
+  const [loadingAssignments, setLoadingAssignments] = useState(true)
+
+  function currentAssignment() {
+    return myAssignments.find((a) => a.id === selectedAssignment) || null
+  }
+
+  useEffect(() => { loadAssignments() }, [teacherId])
+
+  async function loadAssignments() {
+    setLoadingAssignments(true)
+    const { data } = await supabase
+      .from('teacher_assignments').select('*, subjects(name)').eq('teacher_id', teacherId).eq('status', 'approved')
+    setMyAssignments(data || [])
+    if (data && data.length > 0) setSelectedAssignment(data[0].id)
+    setLoadingAssignments(false)
+  }
+
+  const assignment = currentAssignment()
+
+  return (
+    <>
+      <h2>Weekly Quizzes</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
+        Quick, informal quizzes tracked separately from full exams — for trend analysis only, they don't count toward the term aggregate or report cards.
+      </p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+        <button onClick={() => setView('entry')} style={view === 'entry' ? btn : secondaryBtn}>Enter Scores</button>
+        <button onClick={() => setView('analysis')} style={view === 'analysis' ? btn : secondaryBtn}>Analysis</button>
+      </div>
+
+      {loadingAssignments ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
+            {myAssignments.length === 0 ? (
+              <p style={{ color: COLORS.muted }}>No subjects assigned yet.</p>
+            ) : (
+              <label style={fieldLabel}>Subject / Class
+                <select value={selectedAssignment} onChange={(e) => setSelectedAssignment(e.target.value)} style={{ ...input, minWidth: 220 }}>
+                  {myAssignments.map((a) => (
+                    <option key={a.id} value={a.id}>{a.subjects?.name} — {CLASS_OPTIONS.find((c) => c.value === a.class_label)?.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+
+          {!assignment ? (
+            <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+              No approved subject/class assignment selected yet.
+            </div>
+          ) : view === 'entry' ? (
+            <QuizEntryPanel assignment={assignment} teacherId={teacherId} />
+          ) : (
+            <QuizAnalysisPanel assignment={assignment} />
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
+// ============================================================================
+// GRADUATION — any admin can graduate a class (Form 4 by default).
+//
+// Graduating freezes a snapshot of each student's final result into
+// `graduation_records` (final-exam subject marks + grades, total points,
+// mean grade, class position, and the full track-record timeline), then
+// stamps `students.graduated_at`. Graduated students disappear from every
+// active-class screen (marks entry, exams, reports, performance track,
+// attendance, Students list) but stay in the database, and their snapshot
+// survives even if an exam is later deleted.
+//
+// Requires the SQL in graduation.sql (run it BEFORE deploying this file).
+// ============================================================================
+const GRADUATING_COHORTS = ['form_4']
+
+// Builds one student's frozen graduation snapshot from live data.
+async function buildGraduationSnapshot(student, finalExam, examsUpToFinal, scale, rankMap) {
+  const isCbc = student.cohort === 'grade_10'
+  const { data: enrol } = await supabase
+    .from('student_subjects').select('subject_id, is_compulsory, subjects(name)').eq('student_id', student.id)
+  const enrolled = (enrol || []).filter((r) => r.subjects?.name)
+  const subjectIds = enrolled.map((r) => r.subject_id)
+  const examIds = examsUpToFinal.map((e) => e.id)
+
+  const [{ data: marks }, { data: historical }] = await Promise.all([
+    subjectIds.length > 0
+      ? supabase.from('marks').select('score, exam_id, subject_id')
+          .eq('student_id', student.id).in('subject_id', subjectIds).in('exam_id', examIds)
+      : Promise.resolve({ data: [] }),
+    supabase.from('historical_performance').select('*').eq('student_id', student.id).order('order_index'),
+  ])
+
+  const subjectRows = enrolled.map((r) => {
+    const m = (marks || []).find((x) => x.exam_id === finalExam.id && x.subject_id === r.subject_id)
+    const score = m ? m.score : null
+    return {
+      name: r.subjects.name,
+      is_compulsory: r.is_compulsory,
+      score,
+      grade: score === null ? null : (isCbc ? cbcLevel(score, scale) : kcseGrade(score, scale)),
+    }
+  })
+
+  const aggregate = isCbc
+    ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })), scale)
+    : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })), scale)
+
+  const scored = subjectRows.map((r) => r.score).filter((v) => v !== null && v !== undefined)
+  const mp = scored.length > 0 ? meanPoints(scored, scale, isCbc) : null
+  const meanScore = scored.length > 0 ? scored.reduce((a, b) => a + b, 0) / scored.length : null
+
+  // Track record: entrance exam -> historical results -> every exam up to the final one.
+  // `o` is a sort key so class-wide averaging keeps the points in time order.
+  const timeline = []
+  const entrancePoint = entranceTimelinePoint(student)
+  if (entrancePoint) timeline.push({ o: 0, ...entrancePoint })
+  ;(historical || []).forEach((h) => {
+    timeline.push({ o: 1 + Number(h.order_index || 0), label: h.label, value: Math.round((h.points / h.max_points) * 100) })
+  })
+  examsUpToFinal.forEach((ex) => {
+    const exMarks = (marks || []).filter((m) => m.exam_id === ex.id)
+    if (exMarks.length > 0) {
+      const avg = exMarks.reduce((s, m) => s + m.score, 0) / exMarks.length
+      timeline.push({ o: 1000 + ex.order_index, label: ex.name, value: Math.round(avg) })
+    }
+  })
+
+  const ranking = rankMap[student.id]
+  return {
+    student_id: student.id,
+    class_label: student.cohort,
+    final_exam_name: finalExam.name,
+    total_points: aggregate?.total ?? null,
+    max_points: aggregate?.maxTotal ?? null,
+    mean_points: mp !== null ? Math.round(mp * 100) / 100 : null,
+    mean_grade: mp !== null ? gradeForMeanPoints(mp, scale) : null,
+    mean_score: meanScore !== null ? Math.round(meanScore * 10) / 10 : null,
+    position: ranking ? Number(ranking.rnk) : null,
+    subject_results: subjectRows,
+    timeline,
+  }
+}
+
+function GraduationScreen({ profile }) {
+  const [mode, setMode] = useState('graduate') // 'graduate' | 'alumni'
+  return (
+    <div style={pageWrap}>
+      <h2>Graduation</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
+        Any admin can graduate a class. Graduated students keep their final results and track record here permanently.
+      </p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <button onClick={() => setMode('graduate')} style={mode === 'graduate' ? btn : secondaryBtn}>Graduate a Class</button>
+        <button onClick={() => setMode('alumni')} style={mode === 'alumni' ? btn : secondaryBtn}>Graduated Classes</button>
+      </div>
+      {mode === 'graduate'
+        ? <GraduateClassPanel profile={profile} onDone={() => setMode('alumni')} />
+        : <AlumniPanel />}
+    </div>
+  )
+}
+
+function GraduateClassPanel({ profile, onDone }) {
+  const { notify, confirmAction } = useNotify()
+  const { scale: gradeScale } = useGradeScale()
+  const { scale: cbcScale } = useCbcScale()
+  const [classLabel, setClassLabel] = useState(GRADUATING_COHORTS[0])
+  const [exams, setExams] = useState([])
+  const [finalExamId, setFinalExamId] = useState('')
+  const [year, setYear] = useState(String(new Date().getFullYear()))
+  const [progress, setProgress] = useState(null) // { done, total }
+  const [preview, setPreview] = useState(null)   // { rows, nameById }
+  const [saving, setSaving] = useState(false)
+  const isCbc = classLabel === 'grade_10'
+  const scale = isCbc ? cbcScale : gradeScale
+
+  useEffect(() => {
+    supabase.from('exams').select('*').order('order_index', { ascending: false }).then(({ data }) => {
+      setExams(data || [])
+      if (data && data.length > 0) setFinalExamId(data[0].id)
+    })
+  }, [])
+
+  useEffect(() => { setPreview(null) }, [classLabel, finalExamId, year])
+
+  async function handlePreview() {
+    const finalExam = exams.find((e) => e.id === finalExamId)
+    if (!finalExam) { notify('Choose the final exam first.', 'error'); return }
+    if (!/^\d{4}$/.test(year)) { notify('Enter a 4-digit graduation year.', 'error'); return }
+    setPreview(null)
+    setProgress({ done: 0, total: 0 })
+
+    const { data: students, error } = await supabase
+      .from('students').select('*').eq('cohort', classLabel).is('graduated_at', null).order('full_name')
+    if (error) { setProgress(null); notify(`Couldn't load students: ${error.message}`, 'error'); return }
+    if (!students || students.length === 0) { setProgress(null); notify('No active students in that class.', 'error'); return }
+
+    const { data: rankData } = await supabase.rpc('compute_cohort_rankings', { p_cohort: classLabel, p_exam_id: finalExam.id })
+    const rankMap = {}
+    ;(rankData || []).forEach((r) => { rankMap[r.student_id] = r })
+
+    const examsUpToFinal = exams.filter((e) => e.order_index <= finalExam.order_index).sort((a, b) => a.order_index - b.order_index)
+    const rows = []
+    const CHUNK = 6
+    setProgress({ done: 0, total: students.length })
+    for (let i = 0; i < students.length; i += CHUNK) {
+      const batch = students.slice(i, i + CHUNK)
+      const built = await Promise.all(batch.map((s) => buildGraduationSnapshot(s, finalExam, examsUpToFinal, scale, rankMap)))
+      rows.push(...built)
+      setProgress({ done: Math.min(i + CHUNK, students.length), total: students.length })
+    }
+    rows.sort((a, b) => (a.position ?? 1e9) - (b.position ?? 1e9))
+    const nameById = Object.fromEntries(students.map((s) => [s.id, s]))
+    const outOf = rows.length
+    rows.forEach((r) => { r.out_of = outOf })
+    setPreview({ rows, nameById })
+    setProgress(null)
+  }
+
+  async function handleGraduate() {
+    if (!preview) return
+    const label = CLASS_OPTIONS.find((c) => c.value === classLabel)?.label || classLabel
+    const noResult = preview.rows.filter((r) => r.mean_grade === null).length
+    const confirmed = await confirmAction(
+      `Graduate ${label} (${preview.rows.length} students) as the Class of ${year}? They will leave all active-class screens and their results will be frozen.${noResult > 0 ? ` ${noResult} student(s) have no marks for the final exam and will graduate without a result.` : ''}`,
+      { danger: true, confirmLabel: 'Graduate class' }
+    )
+    if (!confirmed) return
+    setSaving(true)
+    const records = preview.rows.map((r) => ({ ...r, graduation_year: Number(year), graduated_by: profile.id }))
+    const { error: recError } = await supabase.from('graduation_records').upsert(records, { onConflict: 'student_id' })
+    if (recError) { setSaving(false); notify(`Couldn't save graduation records: ${recError.message}`, 'error'); return }
+
+    const ids = preview.rows.map((r) => r.student_id)
+    const { error: stuError } = await supabase
+      .from('students').update({ graduated_at: new Date().toISOString(), graduation_year: Number(year) }).in('id', ids)
+    setSaving(false)
+    if (stuError) { notify(`Records saved but couldn't mark students graduated: ${stuError.message}`, 'error'); return }
+
+    notify(`${label} graduated — Class of ${year}.`)
+    setPreview(null)
+    onDone()
+  }
+
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14, alignItems: 'flex-end' }}>
+        <label style={fieldLabel}>Class
+          <select value={classLabel} onChange={(e) => setClassLabel(e.target.value)} style={{ ...input, minWidth: 140 }}>
+            {CLASS_OPTIONS.filter((c) => GRADUATING_COHORTS.includes(c.value)).map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Final exam
+          <select value={finalExamId} onChange={(e) => setFinalExamId(e.target.value)} style={{ ...input, minWidth: 200 }}>
+            {exams.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+        </label>
+        <label style={fieldLabel}>Graduation year
+          <input value={year} onChange={(e) => setYear(e.target.value)} style={{ ...input, width: 100 }} inputMode="numeric" />
+        </label>
+        <button onClick={handlePreview} disabled={!!progress} style={btn}>{progress ? 'Working…' : 'Preview results'}</button>
+      </div>
+      <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 16 }}>
+        Graduating marks and grade come from the final exam you pick; the track record covers entrance results and every exam up to it.
+      </p>
+
+      {progress && progress.total > 0 && (
+        <p style={{ color: COLORS.muted, fontSize: 13 }}>Computing results… {progress.done} / {progress.total}</p>
+      )}
+
+      {preview && (
+        <>
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto', marginBottom: 14 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...th, textAlign: 'center' }}>Pos.</th><th style={th}>Student</th><th style={th}>Adm. No.</th>
+                  <th style={{ ...th, textAlign: 'center' }}>Total</th><th style={{ ...th, textAlign: 'center' }}>Mean Grade</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.rows.map((r) => (
+                  <tr key={r.student_id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                    <td style={{ ...td, textAlign: 'center' }}>{r.position ?? '—'}</td>
+                    <td style={td}>{preview.nameById[r.student_id]?.full_name}</td>
+                    <td style={td}>{preview.nameById[r.student_id]?.admission_no}</td>
+                    <td style={{ ...td, textAlign: 'center' }}>{r.total_points != null ? `${r.total_points} / ${r.max_points}` : '—'}</td>
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700, color: r.mean_grade ? COLORS.ink : COLORS.muted }}>{r.mean_grade || 'No marks'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button onClick={handleGraduate} disabled={saving} style={btn}>
+            {saving ? 'Graduating…' : `Graduate ${preview.rows.length} students`}
+          </button>
+        </>
+      )}
+    </>
+  )
+}
+
+function AlumniPanel() {
+  const { notify, confirmAction } = useNotify()
+  const [years, setYears] = useState([])
+  const [year, setYear] = useState('')
+  const [records, setRecords] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [openRecord, setOpenRecord] = useState(null)
+
+  useEffect(() => { loadYears() }, [])
+  useEffect(() => { if (year) loadRecords() }, [year])
+
+  async function loadYears() {
+    setLoading(true)
+    const { data } = await supabase.from('graduation_records').select('graduation_year').order('graduation_year', { ascending: false })
+    const list = [...new Set((data || []).map((r) => r.graduation_year))]
+    setYears(list)
+    if (list.length > 0) setYear((prev) => (list.includes(Number(prev)) ? prev : String(list[0])))
+    else { setYear(''); setRecords([]) }
+    setLoading(false)
+  }
+
+  async function loadRecords() {
+    setLoading(true)
+    const { data } = await supabase
+      .from('graduation_records').select('*, students(full_name, admission_no)').eq('graduation_year', Number(year))
+    const list = (data || []).sort((a, b) => (a.position ?? 1e9) - (b.position ?? 1e9))
+    setRecords(list)
+    setLoading(false)
+  }
+
+  async function handleReverse() {
+    const confirmed = await confirmAction(
+      `Reverse the Class of ${year} graduation? Students return to their class as active students and the frozen graduation records for that year are permanently deleted.`,
+      { danger: true, confirmLabel: 'Reverse graduation' }
+    )
+    if (!confirmed) return
+    const ids = records.map((r) => r.student_id)
+    const { error: stuError } = await supabase.from('students').update({ graduated_at: null, graduation_year: null }).in('id', ids)
+    if (stuError) { notify(`Couldn't reinstate students: ${stuError.message}`, 'error'); return }
+    const { error: recError } = await supabase.from('graduation_records').delete().eq('graduation_year', Number(year))
+    if (recError) { notify(`Students reinstated, but couldn't delete records: ${recError.message}`, 'error'); return }
+    notify(`Class of ${year} graduation reversed.`)
+    loadYears()
+  }
+
+  // Class-wide summary
+  const graded = records.filter((r) => r.mean_points != null)
+  const classMeanPoints = graded.length > 0 ? graded.reduce((s, r) => s + Number(r.mean_points), 0) / graded.length : null
+  const gradeGroups = {}
+  graded.forEach((r) => {
+    if (!gradeGroups[r.mean_grade]) gradeGroups[r.mean_grade] = { count: 0, pts: 0 }
+    gradeGroups[r.mean_grade].count += 1
+    gradeGroups[r.mean_grade].pts += Number(r.mean_points)
+  })
+  const gradeDist = Object.entries(gradeGroups)
+    .map(([grade, g]) => ({ grade, count: g.count, avg: g.pts / g.count }))
+    .sort((a, b) => b.avg - a.avg)
+  const maxCount = Math.max(1, ...gradeDist.map((g) => g.count))
+
+  const byLabel = new Map()
+  records.forEach((r) => (r.timeline || []).forEach((t) => {
+    if (!byLabel.has(t.label)) byLabel.set(t.label, { o: 0, values: [] })
+    const entry = byLabel.get(t.label)
+    entry.o += t.o
+    entry.values.push(t.value)
+  }))
+  const classTimeline = [...byLabel.entries()]
+    .map(([label, e]) => ({ label, o: e.o / e.values.length, value: Math.round((e.values.reduce((a, b) => a + b, 0) / e.values.length) * 10) / 10 }))
+    .sort((a, b) => a.o - b.o)
+
+  if (loading && years.length === 0) return <p style={{ color: COLORS.muted }}>Loading...</p>
+  if (years.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+        No class has graduated yet.
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', marginBottom: 18, flexWrap: 'wrap' }}>
+        <label style={fieldLabel}>Class of
+          <select value={year} onChange={(e) => setYear(e.target.value)} style={{ ...input, minWidth: 120 }}>
+            {years.map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </label>
+        {records.length > 0 && <button onClick={handleReverse} style={secondaryBtn}>Reverse graduation</button>}
+      </div>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
+        <>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+              <div style={{ fontSize: 11, color: COLORS.muted }}>Graduates</div>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>{records.length}</div>
+            </div>
+            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+              <div style={{ fontSize: 11, color: COLORS.muted }}>Class mean</div>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>
+                {classMeanPoints !== null ? `${(Math.round(classMeanPoints * 100) / 100)} pts` : '—'}
+              </div>
+            </div>
+          </div>
+
+          <div style={sectionLabel}>Class Track Record (average across the class)</div>
+          {classTimeline.length === 0
+            ? <p style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 16 }}>No track record captured.</p>
+            : <div style={{ marginBottom: 18 }} dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(classTimeline) }} />}
+
+          <div style={sectionLabel}>Graduating Grade Distribution</div>
+          <div style={{ marginBottom: 18 }}>
+            {gradeDist.length === 0 && <p style={{ fontSize: 12.5, color: COLORS.muted }}>No graded results.</p>}
+            {gradeDist.map((g) => (
+              <div key={g.grade} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                <span style={{ width: 34, fontSize: 12.5, fontWeight: 700 }}>{g.grade}</span>
+                <div style={{ flex: 1, background: COLORS.ruleLight, borderRadius: 4, height: 14 }}>
+                  <div style={{ width: `${(g.count / maxCount) * 100}%`, background: COLORS.band, height: '100%', borderRadius: 4 }} />
+                </div>
+                <span style={{ width: 28, fontSize: 12, color: COLORS.muted, textAlign: 'right' }}>{g.count}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={sectionLabel}>Graduates</div>
+          <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...th, textAlign: 'center' }}>Pos.</th><th style={th}>Student</th>
+                  <th style={{ ...th, textAlign: 'center' }}>Total</th><th style={{ ...th, textAlign: 'center' }}>Grade</th><th style={th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {records.map((r) => (
+                  <tr key={r.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}`, cursor: 'pointer' }} onClick={() => setOpenRecord(r)}>
+                    <td style={{ ...td, textAlign: 'center' }}>{r.position ?? '—'}</td>
+                    <td style={td}>{r.students?.full_name}<span style={{ color: COLORS.muted, marginLeft: 8 }}>{r.students?.admission_no}</span></td>
+                    <td style={{ ...td, textAlign: 'center' }}>{r.total_points != null ? `${r.total_points} / ${r.max_points}` : '—'}</td>
+                    <td style={{ ...td, textAlign: 'center', fontWeight: 700 }}>{r.mean_grade || '—'}</td>
+                    <td style={{ ...td, color: COLORS.muted }}>View ›</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {openRecord && <GraduateRecordModal record={openRecord} onClose={() => setOpenRecord(null)} />}
+    </>
+  )
+}
+
+function GraduateRecordModal({ record, onClose }) {
+  const subjects = [...(record.subject_results || [])].sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+  const timeline = (record.timeline || []).slice().sort((a, b) => a.o - b.o)
+  const stat = (label, value) => (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '8px 14px' }}>
+      <div style={{ fontSize: 11, color: COLORS.muted }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 800 }}>{value}</div>
+    </div>
+  )
+  return (
+    <div style={modalOverlay}>
+      <div style={{ ...modalCard, maxWidth: 'min(640px, 94vw)', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <h3>{record.students?.full_name} — Class of {record.graduation_year}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
+        </div>
+        <p style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 14 }}>{record.students?.admission_no} · Final exam: {record.final_exam_name}</p>
+
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+          {stat('Graduating grade', record.mean_grade || '—')}
+          {stat('Total points', record.total_points != null ? `${record.total_points} / ${record.max_points}` : '—')}
+          {stat('Mean score', record.mean_score != null ? `${record.mean_score}%` : '—')}
+          {stat('Position', record.position != null ? `${record.position} of ${record.out_of ?? '—'}` : '—')}
+        </div>
+
+        <div style={sectionLabel}>Track Record</div>
+        {timeline.length === 0
+          ? <p style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 16 }}>No track record captured.</p>
+          : <div style={{ marginBottom: 16 }} dangerouslySetInnerHTML={{ __html: buildProgressGraphSvg(timeline) }} />}
+
+        <div style={sectionLabel}>Graduating Marks — {record.final_exam_name}</div>
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead><tr><th style={th}>Subject</th><th style={{ ...th, textAlign: 'center' }}>Score</th><th style={{ ...th, textAlign: 'center' }}>Grade</th></tr></thead>
+            <tbody>
+              {subjects.map((s) => (
+                <tr key={s.name} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                  <td style={td}>{s.name}</td>
+                  <td style={{ ...td, textAlign: 'center' }}>{s.score ?? '—'}</td>
+                  <td style={{ ...td, textAlign: 'center', fontWeight: 700 }}>{s.grade ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
+          <button onClick={onClose} style={secondaryBtn}>Close</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -4264,9 +5290,22 @@ function GradeScaleProvider({ children }) {
 // Replaces the single-student ReportsScreen with one that supports both
 // single and batch modes, plus a WhatsApp send link per student.
 // ============================================================================
-function buildProgressGraphSvg(timeline, maxValue = 100) {
+// First point of a student's track record: their KCPE (Form 3/4) or KJSEA
+// (Grade 10) entry marks as a percentage. Works even if entrance_type was never
+// saved (falls back to the cohort's exam) or entrance_max is missing.
+function entranceTimelinePoint(student) {
+  if (student.entrance_score === null || student.entrance_score === undefined || student.entrance_score === '') return null
+  const isCbc = student.cohort === 'grade_10'
+  const max = Number(student.entrance_max) || (isCbc ? 72 : 500)
+  return {
+    label: student.entrance_type || (isCbc ? 'KJSEA' : 'KCPE'),
+    value: Math.round((Number(student.entrance_score) / max) * 100),
+  }
+}
+
+function buildProgressGraphSvg(timeline, maxValue = 100, svgHeight = 140) {
   if (!timeline || timeline.length === 0) return ''
-  const width = 700, height = 140, padding = { top: 10, right: 16, bottom: 24, left: 30 }
+  const width = 700, height = svgHeight, padding = { top: 10, right: 16, bottom: 24, left: 30 }
   const chartW = width - padding.left - padding.right
   const chartH = height - padding.top - padding.bottom
   const n = timeline.length
@@ -4280,6 +5319,13 @@ function buildProgressGraphSvg(timeline, maxValue = 100) {
   const labels = timeline.map((t, i) => `
     <text x="${xFor(i)}" y="${height - 6}" font-size="9" fill="#6B6558" text-anchor="middle">${t.label}</text>
   `).join('')
+  // Value printed next to each point (above it, or below if it's near the top edge)
+  const valueLabels = timeline.map((t, i) => {
+    const y = yFor(t.value)
+    const ly = y - 7 < padding.top - 1 ? y + 13 : y - 7
+    const shown = Math.round(t.value * 10) / 10
+    return `<text x="${xFor(i)}" y="${ly}" font-size="9" font-weight="700" fill="#1E2A24" text-anchor="middle">${shown}</text>`
+  }).join('')
   const gridStep = maxValue / 4
   const gridLines = [0, 1, 2, 3, 4].map((i) => Math.round(i * gridStep * 10) / 10).map((v) => `
     <line x1="${padding.left}" y1="${yFor(v)}" x2="${width - padding.right}" y2="${yFor(v)}" stroke="#E4DFD1" stroke-width="1" />
@@ -4292,6 +5338,7 @@ function buildProgressGraphSvg(timeline, maxValue = 100) {
       <line x1="${xFor(0)}" y1="${padding.top}" x2="${xFor(0)}" y2="${height - padding.bottom}" stroke="#9C6B2E" stroke-dasharray="3,3" />
       <polyline points="${points}" fill="none" stroke="#2C3E37" stroke-width="2" />
       ${dots}
+      ${valueLabels}
       ${labels}
     </svg>
   `
@@ -4319,10 +5366,10 @@ function buildReportHtml(report, watermarkOverride) {
 
   const rowsHtml = orderedSubjectRows.map((r) => `
     <tr style="border-top:1px solid #E4DFD1;">
-      <td style="padding:7px 10px;">${r.name}${r.is_compulsory ? ' *' : ''}</td>
-      <td style="padding:7px 10px;">${r.prevGrade || '—'}</td>
-      <td style="padding:7px 10px;"><strong>${r.grade || '—'}</strong></td>
-      <td style="padding:7px 10px;color:#6B6558;">${r.remark || ''}</td>
+      <td style="padding:5px 10px;">${r.name}${r.is_compulsory ? ' *' : ''}</td>
+      <td style="padding:5px 10px;">${r.prevGrade || '—'}</td>
+      <td style="padding:5px 10px;"><strong>${r.grade || '—'}</strong></td>
+      <td style="padding:5px 10px;color:#6B6558;">${r.remark || ''}</td>
     </tr>`).join('')
 
   const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -4334,7 +5381,7 @@ function buildReportHtml(report, watermarkOverride) {
       ${reportWatermarkEnabled ? `<img src="${reportBrandingCache.logoUrl}" crossorigin="anonymous" style="position:absolute;top:calc(280px + ${reportWatermarkOffsetY}px);left:calc(50% + ${reportWatermarkOffsetX}px);width:480px;transform:translate(-50%,0);opacity:${reportWatermarkOpacity};pointer-events:none;z-index:0;" />` : ''}
       <div style="position:relative;z-index:1;">
       <!-- Letterhead: logo left, school details centered, second logo right -->
-      <div style="border-bottom:3px solid #2C3E37;padding-bottom:12px;margin-bottom:6px;">
+      <div style="border-bottom:3px solid #2C3E37;padding-bottom:8px;margin-bottom:6px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
           <img src="${reportBrandingCache.logoUrl}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,0.15);" crossorigin="anonymous" />
           <div style="flex:1;text-align:center;">
@@ -4347,13 +5394,13 @@ function buildReportHtml(report, watermarkOverride) {
       </div>
 
       <!-- Title bar -->
-      <div style="display:flex;justify-content:space-between;align-items:center;background:#2C3E37;color:#F4F1E8;padding:9px 16px;margin-bottom:18px;font-size:12.5px;border-radius:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;background:#2C3E37;color:#F4F1E8;padding:7px 16px;margin-bottom:12px;font-size:12.5px;border-radius:8px;">
         <div><strong>${report.exam.name}</strong> &nbsp;·&nbsp; ${report.exam.term} ${report.exam.year}</div>
         <div>Issue Date: ${new Date().toLocaleDateString('en-GB')}</div>
       </div>
 
       <!-- Student info -->
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;background:#F7F5EF;border:1px solid #E4DFD1;padding:12px 16px;margin-bottom:18px;font-size:13px;border-radius:10px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;background:#F7F5EF;border:1px solid #E4DFD1;padding:9px 16px;margin-bottom:12px;font-size:13px;border-radius:10px;">
         <div><span style="color:#6B6558;font-size:11px;">Student</span><br/><strong>${report.student.full_name}</strong></div>
         <div><span style="color:#6B6558;font-size:11px;">Adm. No.</span><br/><strong>${report.student.admission_no}</strong></div>
         <div><span style="color:#6B6558;font-size:11px;">${report.student.cohort === 'grade_10' ? 'Grade' : 'Form'}</span><br/><strong>${report.student.cohort}</strong></div>
@@ -4363,57 +5410,60 @@ function buildReportHtml(report, watermarkOverride) {
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:4px;border-radius:10px;overflow:hidden;">
         <thead>
           <tr style="background:#2C3E37;color:#F4F1E8;">
-            <th style="text-align:left;padding:8px 10px;">Subject</th>
-            <th style="text-align:left;padding:8px 10px;">Previous</th>
-            <th style="text-align:left;padding:8px 10px;">This Exam</th>
-            <th style="text-align:left;padding:8px 10px;">Remarks</th>
+            <th style="text-align:left;padding:6px 10px;">Subject</th>
+            <th style="text-align:left;padding:6px 10px;">Previous</th>
+            <th style="text-align:left;padding:6px 10px;">This Exam</th>
+            <th style="text-align:left;padding:6px 10px;">Remarks</th>
           </tr>
         </thead>
         <tbody>${rowsHtml}</tbody>
       </table>
 
       <!-- Summary: This Term vs Last Term -->
-      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:18px;border-radius:10px;overflow:hidden;">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:12px;border-radius:10px;overflow:hidden;">
         <thead>
           <tr style="background:#2C3E37;color:#F4F1E8;">
-            <th style="text-align:left;padding:7px 10px;"></th>
-            <th style="text-align:left;padding:7px 10px;">Total Points</th>
-            <th style="text-align:left;padding:7px 10px;">Position</th>
+            <th style="text-align:left;padding:5px 10px;"></th>
+            <th style="text-align:left;padding:5px 10px;">Total Points</th>
+            <th style="text-align:left;padding:5px 10px;">Mean ${gradeOrLevelWord}</th>
+            <th style="text-align:left;padding:5px 10px;">Position</th>
           </tr>
         </thead>
         <tbody>
           <tr style="background:#E9DDC6;">
-            <td style="padding:7px 10px;font-weight:700;">This Term</td>
-            <td style="padding:7px 10px;font-weight:700;">${report.aggregate.total} / ${report.aggregate.maxTotal}</td>
-            <td style="padding:7px 10px;font-weight:700;">${report.position ?? '—'} of ${report.outOf ?? '—'}</td>
+            <td style="padding:5px 10px;font-weight:700;">This Term</td>
+            <td style="padding:5px 10px;font-weight:700;">${report.aggregate.total} / ${report.aggregate.maxTotal}</td>
+            <td style="padding:5px 10px;font-weight:700;">${report.meanGrade ? `${report.meanGrade.grade} (${report.meanGrade.points})` : '—'}</td>
+            <td style="padding:5px 10px;font-weight:700;">${report.position ?? '—'} of ${report.outOf ?? '—'}</td>
           </tr>
           <tr style="border-top:1px solid #E4DFD1;">
-            <td style="padding:7px 10px;color:#6B6558;">Last Term</td>
-            <td style="padding:7px 10px;color:#6B6558;">${report.prevAggregate ? `${report.prevAggregate.total} / ${report.prevAggregate.maxTotal}` : '—'}</td>
-            <td style="padding:7px 10px;color:#6B6558;">${report.prevPosition ? `${report.prevPosition} of ${report.prevOutOf}` : '—'}</td>
+            <td style="padding:5px 10px;color:#6B6558;">Last Term</td>
+            <td style="padding:5px 10px;color:#6B6558;">${report.prevAggregate ? `${report.prevAggregate.total} / ${report.prevAggregate.maxTotal}` : '—'}</td>
+            <td style="padding:5px 10px;color:#6B6558;">${report.prevMeanGrade ? `${report.prevMeanGrade.grade} (${report.prevMeanGrade.points})` : '—'}</td>
+            <td style="padding:5px 10px;color:#6B6558;">${report.prevPosition ? `${report.prevPosition} of ${report.prevOutOf}` : '—'}</td>
           </tr>
         </tbody>
       </table>
 
       ${report.timeline && report.timeline.length > 0 ? `
       <!-- Progress graph -->
-      <div style="margin-bottom:18px;">
+      <div style="margin-bottom:12px;">
         <div style="font-size:10.5px;letter-spacing:1px;color:#6B6558;text-transform:uppercase;margin-bottom:4px;">Progress</div>
         <div style="border:1px solid #E4DFD1;padding:6px 4px 0;border-radius:10px;">
-          ${buildProgressGraphSvg(report.timeline)}
+          ${buildProgressGraphSvg(report.timeline, 100, 105)}
         </div>
       </div>
       ` : ''}
 
       <!-- Comments -->
-      <div style="font-size:13px;margin-bottom:18px;line-height:1.6;">
+      <div style="font-size:12.5px;margin-bottom:12px;line-height:1.45;">
         <div><strong>Principal's Comments:</strong> ${report.principalComment || '—'}</div>
         <div><strong>Class Teacher's Comments:</strong> ${report.classTeacherComment || '—'}</div>
         <div style="color:#6B6558;margin-top:6px;">Date: ${today}</div>
       </div>
 
       <!-- Signatures -->
-      <div style="display:flex;justify-content:space-between;margin-top:30px;font-size:12px;">
+      <div style="display:flex;justify-content:space-between;margin-top:22px;font-size:12px;">
         <div style="width:45%;text-align:center;">
           <div style="border-top:1px solid #1E2A24;padding-top:4px;">School Manager</div>
         </div>
@@ -4423,8 +5473,8 @@ function buildReportHtml(report, watermarkOverride) {
       </div>
 
       <!-- Parent / Guardian sign-off -->
-      <div style="margin-top:26px;border-top:1px solid #E4DFD1;padding-top:14px;font-size:12px;">
-        <div style="margin-bottom:10px;">Report seen by Parent / Guardian / Sponsor:</div>
+      <div style="margin-top:14px;border-top:1px solid #E4DFD1;padding-top:10px;font-size:12px;">
+        <div style="margin-bottom:8px;">Report seen by Parent / Guardian / Sponsor:</div>
         <div style="display:flex;justify-content:space-between;">
           <div style="width:45%;">Date: <span style="display:inline-block;border-bottom:1px solid #1E2A24;width:70%;">&nbsp;</span></div>
           <div style="width:45%;">Signature: <span style="display:inline-block;border-bottom:1px solid #1E2A24;width:60%;">&nbsp;</span></div>
@@ -4432,7 +5482,7 @@ function buildReportHtml(report, watermarkOverride) {
       </div>
 
       <!-- Term resumes -->
-      <div style="margin-top:16px;font-size:12.5px;font-weight:700;color:#2C3E37;">
+      <div style="margin-top:10px;font-size:12.5px;font-weight:700;color:#2C3E37;">
         The Term Resumes on: ${report.exam.term_resumes_on ? new Date(report.exam.term_resumes_on).toLocaleDateString('en-GB') : '— (not yet set by admin)'}
       </div>
       </div>
@@ -4458,9 +5508,16 @@ async function reportToPdfBlob(report) {
   const imgData = canvas.toDataURL('image/png')
   const pdf = new jsPDF('p', 'mm', 'a4')
   const pageWidth = pdf.internal.pageSize.getWidth()
-  const imgWidth = pageWidth - 20
-  const imgHeight = (canvas.height * imgWidth) / canvas.width
-  pdf.addImage(imgData, 'PNG', 10, 10, imgWidth, imgHeight)
+  const pageHeight = pdf.internal.pageSize.getHeight()
+  // Fit inside the page: shrink (keeping proportions) if the card is taller
+  // than one A4 page, instead of letting it run off the bottom.
+  let imgWidth = pageWidth - 20
+  let imgHeight = (canvas.height * imgWidth) / canvas.width
+  if (imgHeight > pageHeight - 20) {
+    imgHeight = pageHeight - 20
+    imgWidth = (canvas.width * imgHeight) / canvas.height
+  }
+  pdf.addImage(imgData, 'PNG', (pageWidth - imgWidth) / 2, 10, imgWidth, imgHeight)
   return pdf.output('blob')
 }
 
@@ -4494,19 +5551,43 @@ async function downloadAllAsZip(results, onProgress) {
   URL.revokeObjectURL(url)
 }
 
+// Printing: every report card must fit on exactly one A4 page. The card is
+// measured off-screen at its normal width, then shrunk (CSS zoom) just enough
+// to fit the printable height, so long comments or many subjects don't spill
+// onto a second page.
+const PRINT_FIT_HEIGHT_PX = 1040 // A4 (297mm) minus 6mm margins, with a little spare
+
+function reportPrintZoom(html) {
+  const probe = document.createElement('div')
+  probe.style.cssText = 'position:fixed;left:-9999px;top:0;width:760px;visibility:hidden;'
+  probe.innerHTML = html
+  document.body.appendChild(probe)
+  const card = probe.firstElementChild
+  const height = card ? card.getBoundingClientRect().height : 0
+  document.body.removeChild(probe)
+  if (!height) return 0.9
+  return Math.max(0.5, Math.min(0.98, PRINT_FIT_HEIGHT_PX / height))
+}
+
 function printAllReports(results) {
   const container = document.createElement('div')
   container.id = 'print-all-container'
   container.innerHTML = results
-    .map((r) => `<div style="page-break-after: always; padding: 0; font-family: sans-serif; zoom: 0.8;">${buildReportHtml(r.report)}</div>`)
+    .map((r) => {
+      const html = buildReportHtml(r.report)
+      return `<div class="report-print-page" style="padding:0;font-family:sans-serif;zoom:${reportPrintZoom(html)};">${html}</div>`
+    })
     .join('')
 
   const style = document.createElement('style')
   style.id = 'print-all-style'
   style.innerHTML = `
     @media print {
+      @page { size: A4; margin: 6mm; }
       body > *:not(#print-all-container) { display: none !important; }
       #print-all-container { display: block !important; }
+      #print-all-container .report-print-page { page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; }
+      #print-all-container .report-print-page:last-child { page-break-after: auto; break-after: auto; }
     }
     @media screen { #print-all-container { display: none; } }
   `
@@ -4525,15 +5606,15 @@ function printAllReports(results) {
 function printSingleReport(report) {
   const container = document.createElement('div')
   container.id = 'print-single-container'
-  container.innerHTML = buildReportHtml(report)
+  const html = buildReportHtml(report)
+  container.innerHTML = `<div style="font-family:sans-serif;zoom:${reportPrintZoom(html)};">${html}</div>`
   const style = document.createElement('style')
   style.id = 'print-single-style'
   style.innerHTML = `
-    @page { size: A4; margin: 8mm; }
+    @page { size: A4; margin: 6mm; }
     @media print {
       body > *:not(#print-single-container) { display: none !important; }
       #print-single-container { display: block !important; padding: 0 !important; }
-      #print-single-container > div { zoom: 0.8; }
     }
     @media screen { #print-single-container { display: none; } }
   `
@@ -4556,17 +5637,44 @@ function buildWhatsAppLink(phone, message) {
   return `https://wa.me/${cleaned}?text=${encodeURIComponent(message)}`
 }
 
+// Normalises Kenyan numbers to +254XXXXXXXXX for SMS. Returns null if invalid.
+function normalizeKenyanPhone(phone) {
+  const d = (phone || '').replace(/\D/g, '')
+  if (/^254[17]\d{8}$/.test(d)) return `+${d}`
+  if (/^0[17]\d{8}$/.test(d)) return `+254${d.slice(1)}`
+  if (/^[17]\d{8}$/.test(d)) return `+254${d}`
+  return null
+}
+
+// Same layout as the WhatsApp message (name, exam, each subject's grade,
+// then totals), but kept to plain ASCII. Symbols like the em dash or "|"
+// would switch the whole SMS to Unicode, which fits only 70 characters per
+// segment instead of 160 and costs about double.
+function buildBulkSmsText(report) {
+  const lines = [
+    `${report.student.full_name} (${report.student.admission_no}) - ${report.exam.name}`,
+    ...report.subjectRows.map((r) => `${r.name}: ${r.grade || '-'}`),
+    `Total: ${report.aggregate.total}/${report.aggregate.maxTotal}${report.meanGrade ? `, Mean: ${report.meanGrade.grade}` : ''}, Position: ${report.position}/${report.outOf}`,
+  ]
+  return lines.join('\n').normalize('NFKD').replace(/[^\x20-\x7E\n]/g, '')
+}
+
+// How many SMS credits one message uses (160 chars single, 153 per part if longer).
+function smsSegments(text) {
+  return text.length <= 160 ? 1 : Math.ceil(text.length / 153)
+}
+
 function buildSmsMessage(report) {
   const lines = [
     `${report.student.full_name} (${report.student.admission_no}) - ${report.exam.name}`,
     ...report.subjectRows.map((r) => `${r.name}: ${r.grade || '—'}`),
-    `Total: ${report.aggregate.total}/${report.aggregate.maxTotal} | Position: ${report.position}/${report.outOf}`,
+    `Total: ${report.aggregate.total}/${report.aggregate.maxTotal}${report.meanGrade ? ` | Mean: ${report.meanGrade.grade}` : ''} | Position: ${report.position}/${report.outOf}`,
   ]
   return lines.join('\n')
 }
 
   function ReportsScreen() {
-  const { notify } = useNotify()
+  const { notify, confirmAction } = useNotify()
   const { scale: gradeScale } = useGradeScale()
   const { scale: cbcScale } = useCbcScale()
   const [mode, setMode] = useState('single') // single | batch
@@ -4587,12 +5695,14 @@ function buildSmsMessage(report) {
   const [generatingPrincipal, setGeneratingPrincipal] = useState(false)
   const [generatingTeacher, setGeneratingTeacher] = useState(false)
   const [batchGenerateComments, setBatchGenerateComments] = useState(false)
+  const [smsStatus, setSmsStatus] = useState({}) // studentId -> 'sent' | 'failed' | 'no_phone'
+  const [smsSending, setSmsSending] = useState(false)
   useEffect(() => {
     supabase.from('exams').select('*').order('order_index', { ascending: false }).then(({ data }) => {
       setExams(data || [])
       if (data && data.length > 0) setSelectedExamId(data[0].id)
     })
-    supabase.from('students').select('*').order('full_name').then(({ data }) => setStudents(data || []))
+    supabase.from('students').select('*').is('graduated_at', null).order('full_name').then(({ data }) => setStudents(data || []))
   }, [])
   // Core computation for a single student — reused by both single & batch modes
 async function computeReportFor(student, examId, cache = {}) {
@@ -4618,6 +5728,15 @@ async function computeReportFor(student, examId, cache = {}) {
         remark: now ? now.remark : null,
       }
     })
+    const meanGradeFor = (key) => {
+      const sc = subjectRows.map((r) => r[key]).filter((v) => v !== null && v !== undefined)
+      if (sc.length === 0) return null
+      const activeScale = isCbc ? cbcScale : gradeScale
+      const mp = meanPoints(sc, activeScale, isCbc)
+      return mp === null ? null : { points: Math.round(mp * 100) / 100, grade: gradeForMeanPoints(mp, activeScale) }
+    }
+    const meanGrade = meanGradeFor('score')
+    const prevMeanGrade = prevExam ? meanGradeFor('prevScore') : null
     const aggregate = isCbc
       ? computeCbcTotal(subjectRows.map((r) => ({ score: r.score })), cbcScale)
       : computeKcseAggregate(subjectRows.map((r) => ({ score: r.score, is_compulsory: r.is_compulsory })), gradeScale)
@@ -4648,12 +5767,8 @@ async function computeReportFor(student, examId, cache = {}) {
       prevOutOf = prevSorted.length
     }
     const timeline = []
-    if (student.entrance_type && student.entrance_score != null) {
-      timeline.push({
-        label: student.entrance_type,
-        value: Math.round((student.entrance_score / student.entrance_max) * 100),
-      })
-    }
+    const entrancePoint = entranceTimelinePoint(student)
+    if (entrancePoint) timeline.push(entrancePoint)
     const { data: historical } = await supabase
       .from('historical_performance').select('*').eq('student_id', student.id).order('order_index')
     ;(historical || []).forEach((h) => {
@@ -4677,7 +5792,7 @@ async function computeReportFor(student, examId, cache = {}) {
         timeline.push({ label: ex.name, value: Math.round(meanScore) })
       }
     }
-    return { student, exam, prevExam, subjectRows, aggregate, position, outOf, isCbc, timeline, prevAggregate, prevPosition, prevOutOf }
+    return { student, exam, prevExam, subjectRows, aggregate, meanGrade, prevMeanGrade, position, outOf, isCbc, timeline, prevAggregate, prevPosition, prevOutOf }
   }
   async function generatePreview() {
     if (!selectedExamId || !selectedStudentId) return
@@ -4750,10 +5865,60 @@ async function computeReportFor(student, examId, cache = {}) {
       return next
     })
   }
+  async function handleSendSms({ onlyFailed = false } = {}) {
+    const eligible = batchResults.filter((r) => r.ok && (onlyFailed ? smsStatus[r.student.id] === 'failed' : smsStatus[r.student.id] !== 'sent'))
+    const toSend = []
+    const noPhone = {}
+    eligible.forEach((r) => {
+      const to = normalizeKenyanPhone(r.student.parent_phone)
+      if (to) toSend.push({ id: r.student.id, to, message: buildBulkSmsText(r.report) })
+      else noPhone[r.student.id] = 'no_phone'
+    })
+    const skipped = Object.keys(noPhone).length
+    if (toSend.length === 0) {
+      setSmsStatus((prev) => ({ ...prev, ...noPhone }))
+      notify('No valid parent phone numbers to send to.', 'error')
+      return
+    }
+    const totalSegments = toSend.reduce((sum, m) => sum + smsSegments(m.message), 0)
+    const ok = await confirmAction(
+      `Send results by SMS to ${toSend.length} parent${toSend.length === 1 ? '' : 's'}?${skipped ? ` ${skipped} student${skipped === 1 ? ' has' : 's have'} no valid phone number and will be skipped.` : ''} This will use about ${totalSegments} SMS credits, and messages can't be recalled.`,
+      { confirmLabel: 'Send SMS' }
+    )
+    if (!ok) return
+    setSmsSending(true)
+    setSmsStatus((prev) => ({ ...prev, ...noPhone }))
+    const CHUNK = 50
+    let sent = 0
+    let failed = 0
+    let firstError = ''
+    for (let i = 0; i < toSend.length; i += CHUNK) {
+      const chunk = toSend.slice(i, i + CHUNK)
+      const { data, error } = await supabase.functions.invoke('send-results-sms', { body: { messages: chunk } })
+      const byId = {}
+      if (error || !data?.results) {
+        chunk.forEach((m) => { byId[m.id] = 'failed' })
+        failed += chunk.length
+        firstError = firstError || data?.error || error?.message || 'No response from the SMS function'
+      } else {
+        data.results.forEach((r) => {
+          byId[r.id] = r.ok ? 'sent' : 'failed'
+          if (r.ok) sent++
+          else { failed++; firstError = firstError || r.error || 'Send failed' }
+        })
+      }
+      setSmsStatus((prev) => ({ ...prev, ...byId }))
+    }
+    setSmsSending(false)
+    if (failed === 0) notify(`SMS sent to ${sent} parent${sent === 1 ? '' : 's'}.`)
+    else notify(`${sent} sent, ${failed} failed${firstError ? ` — ${firstError}` : ''}. Use "Retry failed SMS" to resend those.`, 'error')
+  }
+
   async function handleBatchGenerate() {
     if (selectedBatchIds.size === 0 || !selectedExamId) return
     setLoading(true)
     setBatchResults([])
+    setSmsStatus({})
     const cache = {}
     const ids = Array.from(selectedBatchIds)
     // Lower concurrency when AI comments are on — each student then makes
@@ -4930,7 +6095,15 @@ async function computeReportFor(student, examId, cache = {}) {
                 <span style={{ fontSize: 12, color: COLORS.muted }}>
                   {zipProgress ? `Zipping ${zipProgress.done}/${zipProgress.total}...` : `${batchResults.length} reports generated`}
                 </span>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {Object.values(smsStatus).includes('failed') && (
+                    <button onClick={() => handleSendSms({ onlyFailed: true })} disabled={smsSending} style={{ ...secondaryBtn, color: COLORS.warn, borderColor: COLORS.warn }}>
+                      ↻ Retry failed SMS
+                    </button>
+                  )}
+                  <button onClick={() => handleSendSms()} disabled={smsSending || batchResults.length === 0} style={secondaryBtn}>
+                    {smsSending ? 'Sending SMS...' : '📱 SMS Parents'}
+                  </button>
                   <button onClick={() => printAllReports(batchResults)} style={secondaryBtn}>🖨 Print All</button>
                   <button
                     onClick={() => downloadAllAsZip(batchResults, (done, total) => setZipProgress({ done, total })).then(() => setZipProgress(null))}
@@ -4943,7 +6116,7 @@ async function computeReportFor(student, examId, cache = {}) {
               </div>
             <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
               <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-                <thead><tr><th style={th}>Student</th><th style={th}>Total</th><th style={th}>Position</th><th style={th}>Status</th><th style={th}></th></tr></thead>
+                <thead><tr><th style={th}>Student</th><th style={th}>Total</th><th style={th}>Position</th><th style={th}>Status</th><th style={th}>SMS</th><th style={th}></th></tr></thead>
                 <tbody>
                   {batchResults.map((r) => (
                     <tr key={r.student.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
@@ -4953,6 +6126,9 @@ async function computeReportFor(student, examId, cache = {}) {
                       <td style={{ ...td, color: r.ok ? COLORS.good : COLORS.warn }}>
                         {r.ok ? '✓ Saved' : '✕ Failed'}
                         {r.commentError && <div style={{ fontSize: 10.5, color: COLORS.warn }}>Comment generation failed</div>}
+                      </td>
+                      <td style={{ ...td, fontSize: 12, color: smsStatus[r.student.id] === 'sent' ? COLORS.good : smsStatus[r.student.id] ? COLORS.warn : COLORS.muted }}>
+                        {smsStatus[r.student.id] === 'sent' ? '✓ Sent' : smsStatus[r.student.id] === 'failed' ? '✕ Failed' : smsStatus[r.student.id] === 'no_phone' ? 'No valid phone' : '—'}
                       </td>
                       <td style={td}>
                         <div style={{ display: 'flex', gap: 10 }}>
@@ -5263,48 +6439,158 @@ async function loadTeachers() {
 // ADMIN: Performance Track — full class ranking list + most improved,
 // separate from individual report cards
 // ============================================================================
-function buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings) {
-  const improvedRows = mostImproved.map((m, i) => `
-    <tr style="border-top:1px solid #E4DFD1;">
-      <td style="padding:6px 10px;">${i + 1}</td>
-      <td style="padding:6px 10px;">${m.student.full_name}</td>
-      <td style="padding:6px 10px;color:#6B6558;">${m.student.admission_no}</td>
-      <td style="padding:6px 10px;">${m.previousRank} → <strong>${m.currentRank}</strong></td>
-      <td style="padding:6px 10px;color:#3E6B4F;font-weight:700;">▲ ${m.change}</td>
-    </tr>`).join('')
+// A student is flagged as "needs help" when their average mark is below the
+// threshold chosen on the screen, or when they dropped this many places (or
+// more) compared with the previous exam.
+const PT_NEEDS_HELP_RANK_DROP = 5
+const PT_ROWS_PER_PAGE = 28
+const PT_HELP_ROWS_PER_PAGE = 16
 
-  const rankingRows = rankings.map((r) => `
-    <tr style="border-top:1px solid #E4DFD1;">
-      <td style="padding:6px 10px;font-weight:700;">${r.rnk}</td>
-      <td style="padding:6px 10px;">${r.student.full_name}</td>
-      <td style="padding:6px 10px;color:#6B6558;">${r.student.admission_no}</td>
-      <td style="padding:6px 10px;">${r.total_points} / ${r.max_points}</td>
-    </tr>`).join('')
-
-  return `
-    <div style="max-width:760px;margin:0 auto;font-family:sans-serif;color:#1E2A24;padding:20px;">
-      <div style="border-bottom:2px solid #2C3E37;padding-bottom:10px;margin-bottom:16px;">
-        <div style="font-size:18px;font-weight:800;color:#2C3E37;">Performance Track — ${cohortLabel}</div>
-        <div style="font-size:12px;color:#6B6558;">${examLabel}</div>
-      </div>
-
-      ${mostImproved.length > 0 ? `
-      <div style="font-size:13px;font-weight:700;color:#9C6B2E;margin-bottom:6px;">🏆 Most Improved</div>
-      <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:20px;">
-        <thead><tr style="background:#F7F5EF;"><th style="text-align:left;padding:6px 10px;">#</th><th style="text-align:left;padding:6px 10px;">Student</th><th style="text-align:left;padding:6px 10px;">Adm No.</th><th style="text-align:left;padding:6px 10px;">Rank Change</th><th style="text-align:left;padding:6px 10px;">Δ</th></tr></thead>
-        <tbody>${improvedRows}</tbody>
-      </table>` : ''}
-
-      <div style="font-size:13px;font-weight:700;color:#2C3E37;margin-bottom:6px;">Full Class Ranking</div>
-      <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
-        <thead><tr style="background:#2C3E37;color:#F4F1E8;"><th style="text-align:left;padding:6px 10px;">Position</th><th style="text-align:left;padding:6px 10px;">Student</th><th style="text-align:left;padding:6px 10px;">Adm No.</th><th style="text-align:left;padding:6px 10px;">Total Points</th></tr></thead>
-        <tbody>${rankingRows}</tbody>
-      </table>
-    </div>
-  `
+function ptEsc(v) {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings) {
+function ptFindNeedsHelp(studentStats, belowScore) {
+  return studentStats
+    .map((s) => {
+      const reasons = []
+      if (s.meanScore !== null && s.meanScore < belowScore) reasons.push(`Average ${Math.round(s.meanScore)}%`)
+      if (s.rankChange !== null && s.rankChange <= -PT_NEEDS_HELP_RANK_DROP) reasons.push(`Dropped ${Math.abs(s.rankChange)} places`)
+      const weakSubjects = s.subjects.filter((x) => x.score < belowScore).sort((a, b) => a.score - b.score)
+      return { ...s, reasons, weakSubjects }
+    })
+    .filter((s) => s.reasons.length > 0)
+    .sort((a, b) => (a.meanScore ?? 0) - (b.meanScore ?? 0))
+}
+
+function ptTrendHtml(change) {
+  if (change === null || change === undefined) return '<span style="color:#8A8474;">New</span>'
+  if (change > 0) return `<span style="color:#3E6B4F;font-weight:700;">▲ ${change}</span>`
+  if (change < 0) return `<span style="color:#B23A3A;font-weight:700;">▼ ${Math.abs(change)}</span>`
+  return '<span style="color:#8A8474;">–</span>'
+}
+
+// Returns one HTML string per A4 page:
+//   1. Class analysis   2. Grade of every student (as many pages as needed)
+//   3. Most improved    4. Students who need help
+function buildPerformanceTrackPages(d) {
+  const { cohortLabel, examLabel, prevExamLabel, classMean, prevClassMean, subjectMeans, studentStats, mostImproved, needsHelp, helpBelow, maxScalePoints } = d
+  const n = studentStats.length
+  const thS = 'text-align:left;padding:7px 10px;'
+  const tdS = 'padding:6px 10px;vertical-align:top;'
+  const table = (cols, rows) => `<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="background:#2C3E37;color:#F4F1E8;">${cols.map((c) => `<th style="${thS}">${c}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
+  const row = (cells, i) => `<tr style="border-top:1px solid #E4DFD1;${i % 2 ? 'background:#FBFAF6;' : ''}">${cells.map((c) => `<td style="${tdS}">${c}</td>`).join('')}</tr>`
+  const title = (t, sub) => `<div style="font-size:18px;font-weight:800;color:#2C3E37;">${t}</div><div style="font-size:11.5px;color:#6B6558;margin:3px 0 14px;">${sub || ''}</div>`
+  const sub2 = (t) => `<div style="font-size:13px;font-weight:700;color:#2C3E37;margin:18px 0 8px;">${t}</div>`
+  const tile = (label, value, note) => `<div style="flex:1;min-width:150px;border:1px solid #E4DFD1;border-radius:8px;padding:10px 12px;background:#F7F5EF;"><div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#6B6558;">${label}</div><div style="font-size:19px;font-weight:800;color:#2C3E37;margin-top:2px;">${value}</div>${note ? `<div style="font-size:11px;color:#6B6558;margin-top:2px;">${note}</div>` : ''}</div>`
+  const delta = (v) => (v === null || v === undefined) ? '–' : v > 0.004 ? `<span style="color:#3E6B4F;font-weight:700;">▲ ${v.toFixed(2)}</span>` : v < -0.004 ? `<span style="color:#B23A3A;font-weight:700;">▼ ${Math.abs(v).toFixed(2)}</span>` : '<span style="color:#8A8474;">–</span>'
+  const bar = (pct, color) => `<div style="background:#E4DFD1;border-radius:4px;height:12px;overflow:hidden;"><div style="width:${Math.max(0, Math.min(100, pct))}%;background:${color};height:100%;"></div></div>`
+  const empty = (msg) => `<div style="padding:18px;text-align:center;color:#6B6558;background:#F7F5EF;border:1px solid #E4DFD1;border-radius:8px;font-size:12.5px;">${msg}</div>`
+  const chunk = (arr, size) => { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out }
+  const bodies = []
+
+  // ---- Page 1: class analysis ----
+  const top = studentStats[0]
+  const classDelta = classMean && prevClassMean ? delta(classMean.points - prevClassMean.points) : ''
+  const dist = {}
+  studentStats.forEach((s) => {
+    if (!s.grade) return
+    if (!dist[s.grade]) dist[s.grade] = { grade: s.grade, count: 0, pts: s.meanPoints }
+    dist[s.grade].count += 1
+    dist[s.grade].pts = Math.max(dist[s.grade].pts, s.meanPoints)
+  })
+  const distRows = Object.values(dist).sort((a, b) => b.pts - a.pts)
+  const maxCount = Math.max(1, ...distRows.map((x) => x.count))
+  const subjectRowsHtml = subjectMeans.map((s, i) => row([
+    `${ptEsc(s.name)}${subjectMeans.length > 1 && i === 0 ? ' <span style="color:#3E6B4F;font-size:10px;">★ strongest</span>' : ''}${subjectMeans.length > 1 && i === subjectMeans.length - 1 ? ' <span style="color:#B23A3A;font-size:10px;">weakest</span>' : ''}`,
+    s.grade || '–',
+    s.meanPoints,
+    s.count,
+    s.prevMeanPoints !== null && s.prevMeanPoints !== undefined ? delta(s.meanPoints - s.prevMeanPoints) : '–',
+    `<div style="width:110px;">${bar(maxScalePoints > 0 ? (s.meanPoints / maxScalePoints) * 100 : 0, '#3E6B4F')}</div>`,
+  ], i))
+  bodies.push(`
+    ${title('Class Analysis', `${ptEsc(cohortLabel)} · ${ptEsc(examLabel)}${prevExamLabel ? ` · compared with ${ptEsc(prevExamLabel)}` : ''}`)}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      ${tile('Students', n)}
+      ${tile('Class mean', classMean ? `${classMean.grade} (${classMean.points})` : '–', classDelta && classDelta !== '–' ? `${classDelta} vs previous` : '')}
+      ${tile('Top student', top ? ptEsc(top.student.full_name) : '–', top ? `${top.totalPoints} / ${top.maxPoints} points` : '')}
+      ${tile('Need help', needsHelp.length, `average below ${helpBelow}%`)}
+    </div>
+    ${sub2('Grade distribution (each student\'s mean grade)')}
+    ${distRows.length === 0 ? empty('No marks recorded yet.') : table(['Grade', 'Students', ''], distRows.map((x, i) => row([`<strong>${ptEsc(x.grade)}</strong>`, x.count, `<div style="width:260px;">${bar((x.count / maxCount) * 100, '#2C3E37')}</div>`], i)))}
+    ${sub2('Subject performance')}
+    ${subjectMeans.length === 0 ? empty('No marks recorded yet.') : table(['Subject', 'Mean grade', 'Mean points', 'Entries', 'Change', ''], subjectRowsHtml)}
+  `)
+
+  // ---- Pages 2+: grade of every student ----
+  if (n === 0) {
+    bodies.push(`${title('Student Grades', 'All students, ranked')}${empty('No marks recorded for this cohort/exam yet.')}`)
+  } else {
+    chunk(studentStats, PT_ROWS_PER_PAGE).forEach((part, pi) => {
+      bodies.push(`
+        ${title('Student Grades', pi === 0 ? `All ${n} students ranked, with mean grade and movement since the previous exam` : 'continued')}
+        ${table(['Pos', 'Student', 'Adm. No.', 'Total Points', 'Mean %', 'Mean Grade', 'vs Previous'], part.map((s, i) => row([
+          `<strong>${s.rank}</strong>`,
+          ptEsc(s.student.full_name),
+          `<span style="color:#6B6558;">${ptEsc(s.student.admission_no)}</span>`,
+          `${s.totalPoints} / ${s.maxPoints}`,
+          s.meanScore !== null ? (Math.round(s.meanScore * 10) / 10) : '–',
+          `<strong>${ptEsc(s.grade || '–')}</strong>`,
+          ptTrendHtml(s.rankChange),
+        ], i)))}
+      `)
+    })
+  }
+
+  // ---- Most improved ----
+  let improvedBody
+  if (!prevExamLabel) improvedBody = empty('There is no earlier exam to compare with.')
+  else if (mostImproved.length === 0) improvedBody = empty('No student moved up compared with the previous exam.')
+  else improvedBody = table(['#', 'Student', 'Adm. No.', 'Position', 'Mean Grade', 'Mean % change'], mostImproved.map((m, i) => row([
+    i + 1,
+    ptEsc(m.student.full_name),
+    `<span style="color:#6B6558;">${ptEsc(m.student.admission_no)}</span>`,
+    `${m.previousRank} → <strong>${m.currentRank}</strong> <span style="color:#3E6B4F;font-weight:700;">▲ ${m.change}</span>`,
+    `${ptEsc(m.prevGrade || '–')} → <strong>${ptEsc(m.grade || '–')}</strong>`,
+    m.scoreChange !== null && m.scoreChange !== undefined ? `${m.scoreChange > 0 ? '+' : ''}${m.scoreChange.toFixed(1)}` : '–',
+  ], i)))
+  bodies.push(`${title('Most Improved', prevExamLabel ? `Biggest climbs in class position since ${ptEsc(prevExamLabel)}` : '')}${improvedBody}`)
+
+  // ---- Students who need help ----
+  const helpSub = `Average below ${helpBelow}%, or dropped ${PT_NEEDS_HELP_RANK_DROP}+ places since the previous exam. Weak subjects are those scored below ${helpBelow}%.`
+  if (needsHelp.length === 0) {
+    bodies.push(`${title('Students Who Need Help', helpSub)}${empty('No student meets these criteria.')}`)
+  } else {
+    chunk(needsHelp, PT_HELP_ROWS_PER_PAGE).forEach((part, pi) => {
+      bodies.push(`
+        ${title('Students Who Need Help', pi === 0 ? helpSub : 'continued')}
+        ${table(['Student', 'Adm. No.', 'Pos', 'Mean %', 'Grade', 'Why flagged', 'Weak subjects'], part.map((s, i) => row([
+          `<strong>${ptEsc(s.student.full_name)}</strong>`,
+          `<span style="color:#6B6558;">${ptEsc(s.student.admission_no)}</span>`,
+          s.rank,
+          s.meanScore !== null ? Math.round(s.meanScore) : '–',
+          ptEsc(s.grade || '–'),
+          `<span style="color:#B23A3A;">${s.reasons.map(ptEsc).join('<br/>')}</span>`,
+          s.weakSubjects.length > 0 ? s.weakSubjects.map((w) => `${ptEsc(w.subject)} ${Math.round(w.score)}`).join(', ') : '–',
+        ], i)))}
+      `)
+    })
+  }
+
+  const total = bodies.length
+  return bodies.map((body, i) => `
+    <div class="pt-page" style="width:794px;min-height:1120px;box-sizing:border-box;padding:34px 40px 60px;background:#fff;font-family:Arial,Helvetica,sans-serif;color:#1E2A24;position:relative;">
+      <div style="border-bottom:2px solid #2C3E37;padding-bottom:8px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;">
+        <div style="font-size:16px;font-weight:800;color:#2C3E37;">Performance Track — ${ptEsc(cohortLabel)}</div>
+        <div style="font-size:11px;color:#6B6558;">${ptEsc(examLabel)}</div>
+      </div>
+      ${body}
+      <div style="position:absolute;left:40px;right:40px;bottom:22px;font-size:10.5px;color:#8A8474;text-align:right;">Page ${i + 1} of ${total}</div>
+    </div>`)
+}
+
+function buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings, needsHelp = []) {
   const lines = [`Performance Track — ${cohortLabel}`, examLabel, '']
   if (mostImproved.length > 0) {
     lines.push('🏆 Most Improved:')
@@ -5317,6 +6603,11 @@ function buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved,
   rankings.slice(0, 10).forEach((r) => {
     lines.push(`${r.rnk}. ${r.student.full_name} — ${r.total_points}/${r.max_points}`)
   })
+  if (needsHelp.length > 0) {
+    lines.push('')
+    lines.push(`⚠ Need help (${needsHelp.length}):`)
+    needsHelp.slice(0, 5).forEach((s) => lines.push(`• ${s.student.full_name} — ${s.reasons.join(', ')}`))
+  }
   return lines.join('\n')
 }
 
@@ -5330,6 +6621,10 @@ function PerformanceTrackScreen() {
   const [mostImproved, setMostImproved] = useState([])
   const [subjectMeans, setSubjectMeans] = useState([]) // [{ subjectId, name, meanPoints, grade, count }]
   const [classMean, setClassMean] = useState(null) // { points, grade }
+  const [prevClassMean, setPrevClassMean] = useState(null) // same shape, previous exam
+  const [studentStats, setStudentStats] = useState([]) // one entry per ranked student, see loadRankings
+  const [helpBelow, setHelpBelow] = useState(40) // "needs help" if average mark is below this %
+  const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(false)
   const isNarrow = useIsNarrow()
   const isCbc = cohort === 'grade_10'
@@ -5355,10 +6650,11 @@ function PerformanceTrackScreen() {
       .filter((e) => e.order_index < exam.order_index)
       .sort((a, b) => b.order_index - a.order_index)[0]
 
-    const [{ data: current }, { data: students }] = await Promise.all([
+    const [{ data: current, error: rankError }, { data: students, error: studentsError }] = await Promise.all([
       supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: selectedExamId }),
-      supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort),
+      supabase.from('students').select('id, full_name, admission_no').eq('cohort', cohort).is('graduated_at', null),
     ])
+    setLoadError(rankError ? `Ranking failed: ${rankError.message}` : studentsError ? `Couldn't load students: ${studentsError.message}` : '')
     const studentById = Object.fromEntries((students || []).map((s) => [s.id, s]))
 
     const currentRanked = (current || [])
@@ -5367,63 +6663,125 @@ function PerformanceTrackScreen() {
       .sort((a, b) => a.rnk - b.rnk)
     setRankings(currentRanked)
 
+    // Marks for this exam and the previous one, plus the previous ranking.
+    const cohortStudentIds = (students || []).map((s) => s.id)
+    let examMarks = [], prevMarks = [], previous = []
+    if (cohortStudentIds.length > 0) {
+      const marksFor = (examId) => supabase
+        .from('marks').select('score, subject_id, student_id, subjects(name)')
+        .eq('exam_id', examId).in('student_id', cohortStudentIds)
+      const [cur, prv, prk] = await Promise.all([
+        marksFor(selectedExamId),
+        prevExam ? marksFor(prevExam.id) : Promise.resolve({ data: [] }),
+        prevExam ? supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: prevExam.id }) : Promise.resolve({ data: [] }),
+      ])
+      examMarks = cur.data || []
+      prevMarks = prv.data || []
+      previous = prk.data || []
+    }
+
+    const usable = (m) => m.score !== null && m.score !== undefined && m.subjects?.name
+    const groupBySubject = (rows) => {
+      const out = {}
+      rows.filter(usable).forEach((m) => {
+        if (!out[m.subject_id]) out[m.subject_id] = { name: m.subjects.name, scores: [] }
+        out[m.subject_id].scores.push(m.score)
+      })
+      return out
+    }
+    const groupByStudent = (rows) => {
+      const out = {}
+      rows.filter(usable).forEach((m) => {
+        if (!out[m.student_id]) out[m.student_id] = []
+        out[m.student_id].push({ subject: m.subjects.name, score: m.score })
+      })
+      return out
+    }
+    const round2 = (v) => Math.round(v * 100) / 100
+
     // Compiled subject means + overall class mean: every subject actually
     // marked for this cohort/exam, averaged, then averaged again across
     // subjects — "all the subject performance compiled into a class mean".
-    const cohortStudentIds = (students || []).map((s) => s.id)
-    if (cohortStudentIds.length > 0) {
-      const { data: examMarks } = await supabase
-        .from('marks').select('score, subject_id, subjects(name)')
-        .eq('exam_id', selectedExamId).in('student_id', cohortStudentIds)
-      const bySubject = {}
-      ;(examMarks || []).forEach((m) => {
-        if (m.score === null || m.score === undefined || !m.subjects?.name) return
-        const key = m.subject_id
-        if (!bySubject[key]) bySubject[key] = { name: m.subjects.name, scores: [] }
-        bySubject[key].scores.push(m.score)
-      })
-      const means = Object.entries(bySubject).map(([subjectId, v]) => {
-        const mp = meanPoints(v.scores, scale, isCbc)
-        return {
-          subjectId,
-          name: v.name,
-          meanPoints: mp !== null ? Math.round(mp * 100) / 100 : 0,
-          grade: mp !== null ? gradeForMeanPoints(mp, scale) : null,
-          count: v.scores.length,
-        }
-      }).sort((a, b) => b.meanPoints - a.meanPoints)
-      setSubjectMeans(means)
-      if (means.length > 0) {
-        const classMp = means.reduce((a, b) => a + b.meanPoints, 0) / means.length
-        setClassMean({ points: Math.round(classMp * 100) / 100, grade: gradeForMeanPoints(classMp, scale) })
-      } else {
-        setClassMean(null)
+    const bySubject = groupBySubject(examMarks)
+    const prevBySubject = groupBySubject(prevMarks)
+    const means = Object.entries(bySubject).map(([subjectId, v]) => {
+      const mp = meanPoints(v.scores, scale, isCbc)
+      const pv = prevBySubject[subjectId] ? meanPoints(prevBySubject[subjectId].scores, scale, isCbc) : null
+      return {
+        subjectId,
+        name: v.name,
+        meanPoints: mp !== null ? round2(mp) : 0,
+        grade: mp !== null ? gradeForMeanPoints(mp, scale) : null,
+        count: v.scores.length,
+        prevMeanPoints: pv !== null ? round2(pv) : null,
       }
+    }).sort((a, b) => b.meanPoints - a.meanPoints)
+    setSubjectMeans(means)
+    if (means.length > 0) {
+      const classMp = means.reduce((a, b) => a + b.meanPoints, 0) / means.length
+      setClassMean({ points: round2(classMp), grade: gradeForMeanPoints(classMp, scale) })
     } else {
-      setSubjectMeans([])
       setClassMean(null)
     }
+    const prevPoints = Object.values(prevBySubject).map((v) => meanPoints(v.scores, scale, isCbc)).filter((v) => v !== null)
+    if (prevPoints.length > 0) {
+      const pm = prevPoints.reduce((a, b) => a + b, 0) / prevPoints.length
+      setPrevClassMean({ points: round2(pm), grade: gradeForMeanPoints(pm, scale) })
+    } else {
+      setPrevClassMean(null)
+    }
+
+    // Per-student grade + movement since the previous exam.
+    const curByStudent = groupByStudent(examMarks)
+    const prevByStudentMarks = groupByStudent(prevMarks)
+    const prevRankByStudent = Object.fromEntries(previous.map((r) => [r.student_id, r]))
+    const summarize = (list) => {
+      if (!list || list.length === 0) return null
+      const scores = list.map((x) => x.score)
+      const mp = meanPoints(scores, scale, isCbc)
+      return {
+        meanScore: scores.reduce((a, b) => a + b, 0) / scores.length,
+        meanPoints: mp,
+        grade: mp !== null ? gradeForMeanPoints(mp, scale) : null,
+      }
+    }
+    const stats = currentRanked.map((r) => {
+      const cur = summarize(curByStudent[r.student_id])
+      const prv = summarize(prevByStudentMarks[r.student_id])
+      const prevRank = prevRankByStudent[r.student_id] ? Number(prevRankByStudent[r.student_id].rnk) : null
+      return {
+        student: r.student,
+        rank: Number(r.rnk),
+        totalPoints: r.total_points,
+        maxPoints: r.max_points,
+        meanScore: cur ? cur.meanScore : null,
+        meanPoints: cur ? cur.meanPoints : null,
+        grade: cur ? cur.grade : null,
+        subjects: curByStudent[r.student_id] || [],
+        prevRank,
+        rankChange: prevRank !== null ? prevRank - Number(r.rnk) : null, // positive = moved up
+        prevMeanScore: prv ? prv.meanScore : null,
+        prevGrade: prv ? prv.grade : null,
+        scoreChange: cur && prv ? cur.meanScore - prv.meanScore : null,
+      }
+    })
+    setStudentStats(stats)
 
     if (prevExam) {
-      const { data: previous } = await supabase.rpc('compute_cohort_rankings', { p_cohort: cohort, p_exam_id: prevExam.id })
-      const prevByStudent = Object.fromEntries((previous || []).map((r) => [r.student_id, r]))
-
-      const improved = currentRanked
-        .filter((r) => prevByStudent[r.student_id])
-        .map((r) => {
-          const prev = prevByStudent[r.student_id]
-          return {
-            student: r.student,
-            currentRank: Number(r.rnk),
-            previousRank: Number(prev.rnk),
-            change: Number(prev.rnk) - Number(r.rnk), // positive = moved up (improved)
-            currentPoints: r.total_points,
-            previousPoints: prev.total_points,
-          }
-        })
-        .filter((r) => r.change > 0)
-        .sort((a, b) => b.change - a.change)
+      const improved = stats
+        .filter((s) => s.rankChange !== null && s.rankChange > 0)
+        .sort((a, b) => b.rankChange - a.rankChange)
         .slice(0, 10)
+        .map((s) => ({
+          student: s.student,
+          currentRank: s.rank,
+          previousRank: s.prevRank,
+          change: s.rankChange,
+          currentPoints: s.totalPoints,
+          grade: s.grade,
+          prevGrade: s.prevGrade,
+          scoreChange: s.scoreChange,
+        }))
       setMostImproved(improved)
     } else {
       setMostImproved([])
@@ -5440,35 +6798,53 @@ function PerformanceTrackScreen() {
   const currentExam = exams.find((e) => e.id === selectedExamId)
   const examLabel = currentExam ? `${currentExam.name} — ${currentExam.term} ${currentExam.year}` : ''
 
+  const prevExam = currentExam
+    ? exams.filter((e) => e.order_index < currentExam.order_index).sort((a, b) => b.order_index - a.order_index)[0]
+    : null
+  const prevExamLabel = prevExam ? `${prevExam.name} — ${prevExam.term} ${prevExam.year}` : ''
+  const needsHelp = ptFindNeedsHelp(studentStats, helpBelow)
+  const statsById = Object.fromEntries(studentStats.map((s) => [s.student.id, s]))
+  const trackData = { cohortLabel, examLabel, prevExamLabel, classMean, prevClassMean, subjectMeans, studentStats, mostImproved, needsHelp, helpBelow, maxScalePoints }
+
+  // One A4 page per section chunk: class analysis, every student's grade,
+  // most improved, students who need help.
   async function downloadPdf() {
-    const container = document.createElement('div')
-    container.style.position = 'fixed'
-    container.style.left = '-9999px'
-    container.style.background = '#fff'
-    container.style.width = '800px'
-    container.innerHTML = buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings)
-    document.body.appendChild(container)
-    const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff' })
-    document.body.removeChild(container)
-    const imgData = canvas.toDataURL('image/png')
+    const pages = buildPerformanceTrackPages(trackData)
     const pdf = new jsPDF('p', 'mm', 'a4')
-    const pageWidth = pdf.internal.pageSize.getWidth()
-    const imgWidth = pageWidth - 20
-    const imgHeight = (canvas.height * imgWidth) / canvas.width
-    pdf.addImage(imgData, 'PNG', 10, 10, imgWidth, imgHeight)
+    const pageW = pdf.internal.pageSize.getWidth()
+    const pageH = pdf.internal.pageSize.getHeight()
+    for (let i = 0; i < pages.length; i++) {
+      const container = document.createElement('div')
+      container.style.position = 'fixed'
+      container.style.left = '-9999px'
+      container.style.top = '0'
+      container.style.background = '#fff'
+      container.innerHTML = pages[i]
+      document.body.appendChild(container)
+      const canvas = await html2canvas(container.firstElementChild, { scale: 2, backgroundColor: '#ffffff' })
+      document.body.removeChild(container)
+      if (i > 0) pdf.addPage()
+      let w = pageW
+      let h = (canvas.height * w) / canvas.width
+      if (h > pageH) { h = pageH; w = (canvas.width * h) / canvas.height }
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, w, h)
+    }
     pdf.save(`${cohortLabel.replace(/\s+/g, '_')}_${examLabel.replace(/[^\w]+/g, '_')}_Performance_Track.pdf`)
   }
 
   function printTrack() {
     const container = document.createElement('div')
     container.id = 'print-pt-container'
-    container.innerHTML = buildPerformanceTrackHtml(cohortLabel, examLabel, mostImproved, rankings)
+    container.innerHTML = buildPerformanceTrackPages(trackData).join('')
     const style = document.createElement('style')
     style.id = 'print-pt-style'
     style.innerHTML = `
       @media print {
+        @page { size: A4; margin: 0; }
         body > *:not(#print-pt-container) { display: none !important; }
         #print-pt-container { display: block !important; }
+        #print-pt-container .pt-page { page-break-after: always; break-after: page; }
+        #print-pt-container .pt-page:last-child { page-break-after: auto; break-after: auto; }
       }
       @media screen { #print-pt-container { display: none; } }
     `
@@ -5483,14 +6859,14 @@ function PerformanceTrackScreen() {
     window.addEventListener('afterprint', cleanup)
   }
 
-  const whatsAppText = buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings)
+  const whatsAppText = buildPerformanceTrackWhatsAppText(cohortLabel, examLabel, mostImproved, rankings, needsHelp)
   const whatsAppShareLink = `https://wa.me/?text=${encodeURIComponent(whatsAppText)}`
 
   return (
     <div style={pageWrap}>
       <h2>Performance Track</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
-        Full class ranking and most-improved students for an exam, compared against the one before it.
+        Class analysis, every student's grade, most-improved students and students who need help, compared against the previous exam. The PDF has several pages.
       </p>
 
       <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap' }}>
@@ -5513,6 +6889,7 @@ function PerformanceTrackScreen() {
         </div>
       </div>
 
+      {loadError && <p style={{ ...errorText, marginBottom: 16 }}>{loadError}</p>}
       {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
         <>
           <div style={{ marginBottom: 28 }}>
@@ -5573,6 +6950,49 @@ function PerformanceTrackScreen() {
             </div>
           )}
 
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+              <div style={sectionLabel}>⚠ Students Who Need Help ({needsHelp.length})</div>
+              <label style={fieldLabel}>Average below (%)
+                <input
+                  type="number" min="0" max="100" value={helpBelow}
+                  onChange={(e) => setHelpBelow(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                  style={{ ...input, width: 90 }}
+                />
+              </label>
+            </div>
+            <p style={{ color: COLORS.muted, fontSize: 12, margin: '0 0 10px' }}>
+              Flagged when their average mark is below {helpBelow}%, or they dropped {PT_NEEDS_HELP_RANK_DROP}+ places since the previous exam.
+            </p>
+            {needsHelp.length === 0 ? (
+              <div style={{ textAlign: 'center', color: COLORS.muted, padding: 20, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+                No student meets these criteria.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {needsHelp.map((s) => (
+                  <div key={s.student.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: '10px 16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                      <div>
+                        <span style={{ fontWeight: 700, fontSize: 13.5 }}>{s.student.full_name}</span>
+                        <span style={{ fontSize: 11.5, color: COLORS.muted, marginLeft: 8 }}>{s.student.admission_no}</span>
+                      </div>
+                      <div style={{ fontSize: 12.5 }}>
+                        Position {s.rank} · {s.meanScore !== null ? `${Math.round(s.meanScore)}%` : '—'} · <strong>{s.grade || '—'}</strong>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, color: COLORS.warn, marginTop: 4 }}>{s.reasons.join(' · ')}</div>
+                    {s.weakSubjects.length > 0 && (
+                      <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 2 }}>
+                        Weak subjects: {s.weakSubjects.map((w) => `${w.subject} ${Math.round(w.score)}`).join(', ')}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div style={sectionLabel}>Full Class Ranking</div>
           {isNarrow ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -5582,7 +7002,7 @@ function PerformanceTrackScreen() {
                     <span style={{ fontWeight: 700, fontSize: 13.5 }}>{r.rnk}. {r.student.full_name}</span>
                     <div style={{ fontSize: 11, color: COLORS.muted }}>{r.student.admission_no}</div>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{r.total_points}/{r.max_points}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{r.total_points}/{r.max_points}{statsById[r.student_id]?.grade ? ` · ${statsById[r.student_id].grade}` : ''}</div>
                 </div>
               ))}
               {rankings.length === 0 && (
@@ -5594,7 +7014,7 @@ function PerformanceTrackScreen() {
           ) : (
             <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
               <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
-                <thead><tr><th style={th}>Position</th><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={th}>Total Points</th></tr></thead>
+                <thead><tr><th style={th}>Position</th><th style={th}>Student</th><th style={th}>Adm. No.</th><th style={th}>Total Points</th><th style={th}>Mean Grade</th></tr></thead>
                 <tbody>
                   {rankings.map((r) => (
                     <tr key={r.student_id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
@@ -5602,10 +7022,11 @@ function PerformanceTrackScreen() {
                       <td style={td}>{r.student.full_name}</td>
                       <td style={{ ...td, color: COLORS.muted }}>{r.student.admission_no}</td>
                       <td style={td}>{r.total_points} / {r.max_points}</td>
+                      <td style={{ ...td, fontWeight: 700 }}>{statsById[r.student_id]?.grade || '—'}</td>
                     </tr>
                   ))}
                   {rankings.length === 0 && (
-                    <tr><td colSpan={4} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No marks recorded for this cohort/exam yet.</td></tr>
+                    <tr><td colSpan={5} style={{ ...td, textAlign: 'center', color: COLORS.muted, padding: 24 }}>No marks recorded for this cohort/exam yet.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -5635,7 +7056,7 @@ function AttendanceCore({ classLabel, recorderId }) {
   async function loadStudentsAndAttendance() {
     setLoading(true)
     const { data: studentData } = await supabase
-      .from('students').select('*').eq('cohort', classLabel).order('full_name')
+      .from('students').select('*').eq('cohort', classLabel).is('graduated_at', null).order('full_name')
     setStudents(studentData || [])
 
     const { data: attData } = await supabase
@@ -7347,6 +8768,7 @@ function AppContent() {
             {tab === 'Timetable' && <TimetableScreen />}
             {tab === 'Profiles' && <TeachersScreen currentUserId={profile.id} />}
             {tab === 'Enter Marks' && LEADERSHIP_TITLES.includes(profile.title) && <AdminMarksEntryScreen profile={profile} />}
+            {tab === 'Graduation' && <GraduationScreen profile={profile} />}
             {tab === 'Finance' && FINANCE_VISIBLE_TITLES.includes(profile.title) && <AdminFinanceScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} viewerTitle={profile.title} />}
