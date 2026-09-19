@@ -342,6 +342,13 @@ const FINANCE_VISIBLE_TITLES = ['Principal', 'Deputy Principal', 'Dean of Studie
 // don't teach a subject/class, so the Profiles screen shouldn't offer to
 // assign them one.
 const NON_TEACHING_TITLES = ['School Manager', 'Director']
+// The untitled top-level "school admin" login is an internal account: it is
+// never shown in staff lists, pickers, approvals, or completion trackers
+// (it still works normally when signed in).
+const isSchoolAdminAccount = (p) => !!p && p.role === 'admin' && !p.title
+// Anyone who can actually be scheduled on the timetable.
+const isTimetableStaff = (p) =>
+  !!p && (p.role === 'teacher' || (p.role === 'admin' && !!p.title && !NON_TEACHING_TITLES.includes(p.title)))
 
 function Signup({ onSwitchToLogin, onSignedUp }) {
   const [fullName, setFullName] = useState('')
@@ -527,7 +534,7 @@ function TopBar({ tab, setTab, onLogout, fullName, title }) {
   const isLeadership = LEADERSHIP_TITLES.includes(title)
   const canSeeFinance = FINANCE_VISIBLE_TITLES.includes(title)
   const tabs = [
-    'Dashboard', 'Students', 'Exams', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
+    'Dashboard', 'Students', 'Exams', 'Quizzes', 'Reports', 'Performance Track', 'Attendance', 'Timetable', 'Profiles',
     ...(isLeadership ? ['Enter Marks'] : []),
     'Graduation',
     ...(canSeeFinance ? ['Finance'] : []),
@@ -656,9 +663,9 @@ function DashboardScreen({ onNavigate }) {
 
   async function loadCounts() {
     setLoading(true)
-    const [{ count: studentCount }, { count: pendingCount }, { count: examCount }, { data: teacherRows }] = await Promise.all([
+    const [{ count: studentCount }, { data: pendingRows }, { count: examCount }, { data: teacherRows }] = await Promise.all([
       supabase.from('students').select('*', { count: 'exact', head: true }).is('graduated_at', null),
-      supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+      supabase.from('profiles').select('role, title').eq('status', 'pending'),
       supabase.from('exams').select('*', { count: 'exact', head: true }),
       // Fetched (not head-counted) so we can apply the same "actually
       // teaching" rule used on the Profiles tab: exclude non-teaching admin
@@ -668,7 +675,7 @@ function DashboardScreen({ onNavigate }) {
     const teacherCount = (teacherRows || []).filter(
       (p) => p.role === 'teacher' || (p.role === 'admin' && p.title && !NON_TEACHING_TITLES.includes(p.title))
     ).length
-    setCounts({ students: studentCount ?? 0, pending: pendingCount ?? 0, exams: examCount ?? 0, teachers: teacherCount })
+    setCounts({ students: studentCount ?? 0, pending: (pendingRows || []).filter((p) => !isSchoolAdminAccount(p)).length, exams: examCount ?? 0, teachers: teacherCount })
     setLoading(false)
   }
 
@@ -729,16 +736,17 @@ function ApprovalsScreen({ currentUserId, viewerTitle }) {
     setLoading(false)
   }
 
-  const visiblePending = canSeeFinance ? pending : pending.filter((p) => p.role !== 'finance')
+  const visiblePending = (canSeeFinance ? pending : pending.filter((p) => p.role !== 'finance'))
+    .filter((p) => !isSchoolAdminAccount(p))
 
   async function loadPendingAssignments() {
     setLoadingAssignments(true)
     const { data, error } = await supabase
       .from('teacher_assignments')
-      .select('*, subjects(name), profiles(full_name)')
+      .select('*, subjects(name), profiles(full_name, role, title)')
       .eq('status', 'pending')
       .order('created_at', { ascending: true })
-    if (!error) setPendingAssignments(data || [])
+    if (!error) setPendingAssignments((data || []).filter((a) => !isSchoolAdminAccount(a.profiles)))
     setLoadingAssignments(false)
   }
 
@@ -4285,6 +4293,22 @@ function AdminMarksEntryScreen({ profile }) {
 //   created_at timestamptz default now()
 // );
 //
+// -- Weekly quizzes are created school-wide by the Dean / admins (like exams):
+// create table quiz_weeks (
+//   id uuid primary key default gen_random_uuid(),
+//   title text not null,
+//   term text,
+//   year int,
+//   quiz_date date not null default current_date,
+//   max_score numeric not null default 10,
+//   order_index int not null default 1,
+//   created_by uuid references profiles(id),
+//   created_at timestamptz default now()
+// );
+// alter table quizzes add column week_id uuid references quiz_weeks(id) on delete cascade;
+// alter table quizzes add constraint quizzes_week_subject_class_key unique (week_id, subject_id, class_label);
+// (also run the RLS policies for quiz_weeks from quiz_weeks.sql)
+//
 // create table quiz_scores (
 //   id uuid primary key default gen_random_uuid(),
 //   quiz_id uuid references quizzes(id) on delete cascade,
@@ -4295,56 +4319,243 @@ function AdminMarksEntryScreen({ profile }) {
 //   unique (quiz_id, student_id)
 // );
 // ============================================================================
-function NewQuizModal({ assignment, teacherId, onClose, onCreated }) {
-  const { notify } = useNotify()
+// ----------------------------------------------------------------------------
+// ADMIN (Dean / any admin): create weekly quizzes school-wide, the same way
+// exams work — the admin creates the quiz once, then each teacher enters
+// scores for their own subject/class under Quizzes.
+// ----------------------------------------------------------------------------
+function QuizWeeksScreen() {
+  const { notify, confirmAction } = useNotify()
+  const isNarrow = useIsNarrow()
+  const [weeks, setWeeks] = useState([])
+  const [loading, setLoading] = useState(true)
   const [title, setTitle] = useState('')
+  const [term, setTerm] = useState('Term 1')
+  const [year, setYear] = useState(new Date().getFullYear())
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
   const [maxScore, setMaxScore] = useState('10')
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [deletingId, setDeletingId] = useState(null)
+  const [viewingWeek, setViewingWeek] = useState(null)
 
-  async function handleSave() {
-    if (!title.trim()) { setError('Give the quiz a name.'); return }
+  useEffect(() => { loadWeeks() }, [])
+
+  async function loadWeeks() {
+    setLoading(true)
+    const { data, error } = await supabase.from('quiz_weeks').select('*').order('quiz_date', { ascending: false })
+    if (error) notify(`Couldn't load quizzes: ${error.message}`, 'error')
+    setWeeks(data || [])
+    setLoading(false)
+  }
+
+  async function createWeek() {
+    if (!title.trim()) { notify('Give the quiz a name.', 'error'); return }
+    const max = Number(maxScore)
+    if (!max || max <= 0) { notify('Enter a valid maximum score.', 'error'); return }
     setSaving(true)
-    setError('')
-    const { data: existing } = await supabase
-      .from('quizzes').select('order_index')
-      .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label)
-      .order('order_index', { ascending: false }).limit(1)
-    const nextOrder = existing && existing.length > 0 ? existing[0].order_index + 1 : 1
-    const { data, error: insertError } = await supabase.from('quizzes').insert({
-      subject_id: assignment.subject_id, class_label: assignment.class_label,
-      title: title.trim(), quiz_date: date, max_score: Number(maxScore) || 10,
-      order_index: nextOrder, created_by: teacherId,
-    }).select().single()
+    const nextOrder = weeks.length > 0 ? Math.max(...weeks.map((w) => w.order_index || 0)) + 1 : 1
+    const { data: { user } } = await supabase.auth.getUser()
+    const { error } = await supabase.from('quiz_weeks').insert({
+      title: title.trim(), term, year, quiz_date: date, max_score: max,
+      order_index: nextOrder, created_by: user.id,
+    })
     setSaving(false)
-    if (insertError) { setError(insertError.message); return }
-    notify('Quiz created.')
-    onCreated(data.id)
+    if (error) { notify(`Couldn't create quiz: ${error.message}`, 'error'); return }
+    notify('Quiz created — teachers can now enter scores for it.')
+    setTitle('')
+    loadWeeks()
+  }
+
+  async function handleDeleteWeek(week) {
+    const confirmed = await confirmAction(
+      `Permanently delete "${week.title}"? This also removes every score teachers have entered for it. This cannot be undone.`,
+      { danger: true, confirmLabel: 'Delete Quiz' }
+    )
+    if (!confirmed) return
+    setDeletingId(week.id)
+    const { data: quizRows, error: quizErr } = await supabase.from('quizzes').select('id').eq('week_id', week.id)
+    if (quizErr) { setDeletingId(null); notify(`Couldn't delete: ${quizErr.message}`, 'error'); return }
+    const quizIds = (quizRows || []).map((q) => q.id)
+    if (quizIds.length > 0) {
+      const { error: scoreErr } = await supabase.from('quiz_scores').delete().in('quiz_id', quizIds)
+      if (scoreErr) { setDeletingId(null); notify(`Couldn't delete: ${scoreErr.message}`, 'error'); return }
+      const { error: qErr } = await supabase.from('quizzes').delete().eq('week_id', week.id)
+      if (qErr) { setDeletingId(null); notify(`Couldn't delete: ${qErr.message}`, 'error'); return }
+    }
+    // .select() so a policy-blocked delete (0 rows) is reported instead of passing silently.
+    const { data: removed, error: weekErr } = await supabase.from('quiz_weeks').delete().eq('id', week.id).select()
+    setDeletingId(null)
+    if (weekErr) { notify(`Couldn't delete: ${weekErr.message}`, 'error'); return }
+    if (!removed || removed.length === 0) { notify("Couldn't delete — permission denied by the database.", 'error'); return }
+    notify(`${week.title} deleted.`)
+    loadWeeks()
+  }
+
+  if (viewingWeek) {
+    return <QuizWeekOverview week={viewingWeek} onBack={() => setViewingWeek(null)} />
   }
 
   return (
-    <div style={modalOverlay}>
-      <div style={{ ...modalCard, maxWidth: 'min(380px, 94vw)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3>New Quiz</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>✕</button>
-        </div>
-        <label style={fieldLabel}>Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} style={input} placeholder="e.g. Week 3 Quiz" />
-        </label>
-        <label style={fieldLabel}>Date
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={input} />
-        </label>
-        <label style={fieldLabel}>Out of (max score)
-          <input type="number" min={1} value={maxScore} onChange={(e) => setMaxScore(e.target.value)} style={input} />
-        </label>
-        {error && <p style={errorText}>{error}</p>}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
-          <button onClick={onClose} style={secondaryBtn}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} style={btn}>{saving ? 'Saving...' : 'Create'}</button>
+    <div style={pageWrap}>
+      <h2>Weekly Quizzes</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
+        Create a quiz once and every teacher can enter scores for it under their own subject and class. Quizzes are for trend analysis only — they never count toward exam aggregates or report cards.
+      </p>
+
+      <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 18, marginBottom: 24 }}>
+        <div style={{ display: 'flex', flexDirection: isNarrow ? 'column' : 'row', gap: 12, alignItems: isNarrow ? 'stretch' : 'flex-end', flexWrap: 'wrap' }}>
+          <label style={fieldLabel}>Quiz name
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Week 3 Quiz" style={input} />
+          </label>
+          <label style={fieldLabel}>Term
+            <select value={term} onChange={(e) => setTerm(e.target.value)} style={input}>
+              <option>Term 1</option><option>Term 2</option><option>Term 3</option>
+            </select>
+          </label>
+          <label style={fieldLabel}>Year
+            <input type="number" value={year} onChange={(e) => setYear(Number(e.target.value))} style={input} />
+          </label>
+          <label style={fieldLabel}>Date
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={input} />
+          </label>
+          <label style={fieldLabel}>Out of
+            <input type="number" min={1} value={maxScore} onChange={(e) => setMaxScore(e.target.value)} style={input} />
+          </label>
+          <button onClick={createWeek} disabled={saving} style={btn}>{saving ? 'Creating...' : '+ Create Quiz'}</button>
         </div>
       </div>
+
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : weeks.length === 0 ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No weekly quizzes yet.
+        </div>
+      ) : isNarrow ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {weeks.map((w) => (
+            <div key={w.id} style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{w.title}</div>
+              <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 2 }}>
+                {[w.term, w.year].filter(Boolean).join(' ')} · {new Date(w.quiz_date).toLocaleDateString('en-GB')} · out of {w.max_score}
+              </div>
+              <button onClick={() => setViewingWeek(w)} style={{ ...secondaryBtn, marginTop: 10, width: '100%', fontSize: 12 }}>📊 View Progress</button>
+              <button
+                onClick={() => handleDeleteWeek(w)} disabled={deletingId === w.id}
+                style={{ ...secondaryBtn, marginTop: 6, width: '100%', fontSize: 12, color: COLORS.warn, borderColor: COLORS.warn }}
+              >
+                {deletingId === w.id ? 'Deleting...' : '🗑 Delete Quiz'}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
+            <thead><tr><th style={th}>Quiz</th><th style={th}>Term</th><th style={th}>Date</th><th style={th}>Out of</th><th style={th}></th></tr></thead>
+            <tbody>
+              {weeks.map((w) => (
+                <tr key={w.id} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                  <td style={td}>{w.title}</td>
+                  <td style={td}>{[w.term, w.year].filter(Boolean).join(' ')}</td>
+                  <td style={td}>{new Date(w.quiz_date).toLocaleDateString('en-GB')}</td>
+                  <td style={td}>{w.max_score}</td>
+                  <td style={{ ...td, textAlign: 'right' }}>
+                    <button onClick={() => setViewingWeek(w)} style={{ fontSize: 12, color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', padding: 0, marginRight: 14 }}>
+                      📊 View Progress
+                    </button>
+                    <button
+                      onClick={() => handleDeleteWeek(w)} disabled={deletingId === w.id}
+                      style={{ fontSize: 12, color: COLORS.warn, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                    >
+                      {deletingId === w.id ? 'Deleting...' : '🗑 Delete'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Per-quiz progress: every approved teacher/subject/class assignment with
+// how many scores have been entered and the class average (%).
+function QuizWeekOverview({ week, onBack }) {
+  const [rows, setRows] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => { load() }, [week.id])
+
+  async function load() {
+    setLoading(true)
+    const [{ data: assignData }, { data: quizData }] = await Promise.all([
+      supabase.from('teacher_assignments').select('*, subjects(name), profiles(full_name, role, title)').eq('status', 'approved'),
+      supabase.from('quizzes').select('id, subject_id, class_label').eq('week_id', week.id),
+    ])
+    const quizIds = (quizData || []).map((q) => q.id)
+    const scoresByQuiz = {}
+    if (quizIds.length > 0) {
+      // Page through results so large schools don't hit the 1000-row default limit.
+      for (let from = 0; ; from += 1000) {
+        const { data: page } = await supabase
+          .from('quiz_scores').select('quiz_id, score').in('quiz_id', quizIds).range(from, from + 999)
+        ;(page || []).forEach((s) => { (scoresByQuiz[s.quiz_id] = scoresByQuiz[s.quiz_id] || []).push(Number(s.score)) })
+        if (!page || page.length < 1000) break
+      }
+    }
+    const quizByKey = Object.fromEntries((quizData || []).map((q) => [`${q.subject_id}:${q.class_label}`, q]))
+    const classOrder = CLASS_OPTIONS.map((c) => c.value)
+    const built = (assignData || [])
+      .filter((a) => !isSchoolAdminAccount(a.profiles))
+      .map((a) => {
+        const q = quizByKey[`${a.subject_id}:${a.class_label}`]
+        const scores = q ? (scoresByQuiz[q.id] || []) : []
+        const avgPct = scores.length > 0
+          ? Math.round((scores.reduce((x, y) => x + y, 0) / scores.length / week.max_score) * 1000) / 10
+          : null
+        return {
+          key: a.id, classLabel: a.class_label, subject: a.subjects?.name || '—',
+          teacher: a.profiles?.full_name || '—', entered: scores.length, avgPct,
+        }
+      })
+      .sort((a, b) => classOrder.indexOf(a.classLabel) - classOrder.indexOf(b.classLabel) || a.subject.localeCompare(b.subject))
+    setRows(built)
+    setLoading(false)
+  }
+
+  const started = rows.filter((r) => r.entered > 0).length
+
+  return (
+    <div style={pageWrap}>
+      <button onClick={onBack} style={{ ...secondaryBtn, marginBottom: 14 }}>← Back</button>
+      <h2>{week.title}</h2>
+      <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
+        {[week.term, week.year].filter(Boolean).join(' ')} · {new Date(week.quiz_date).toLocaleDateString('en-GB')} · out of {week.max_score}
+        {!loading && ` · ${started} of ${rows.length} subject/class assignments have scores`}
+      </p>
+      {loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : rows.length === 0 ? (
+        <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
+          No approved teacher assignments yet.
+        </div>
+      ) : (
+        <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, overflow: 'auto' }}>
+          <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
+            <thead><tr><th style={th}>Class</th><th style={th}>Subject</th><th style={th}>Teacher</th><th style={{ ...th, textAlign: 'center' }}>Scores</th><th style={{ ...th, textAlign: 'center' }}>Class avg</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.key} style={{ borderTop: `1px solid ${COLORS.ruleLight}` }}>
+                  <td style={td}>{CLASS_OPTIONS.find((c) => c.value === r.classLabel)?.label || r.classLabel}</td>
+                  <td style={td}>{r.subject}</td>
+                  <td style={{ ...td, color: COLORS.muted }}>{r.teacher}</td>
+                  <td style={{ ...td, textAlign: 'center', color: r.entered > 0 ? COLORS.ink : COLORS.muted }}>{r.entered > 0 ? r.entered : 'Not started'}</td>
+                  <td style={{ ...td, textAlign: 'center' }}>{r.avgPct !== null ? `${r.avgPct}%` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -4357,7 +4568,6 @@ function QuizEntryPanel({ assignment, teacherId }) {
   const [scoresByStudent, setScoresByStudent] = useState({})
   const [drafts, setDrafts] = useState({})
   const [loading, setLoading] = useState(true)
-  const [showNew, setShowNew] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
   const isNarrow = useIsNarrow()
@@ -4367,6 +4577,26 @@ function QuizEntryPanel({ assignment, teacherId }) {
 
   async function loadQuizzes() {
     setLoading(true)
+    // Weekly quizzes are created school-wide by the Dean/admins (quiz_weeks).
+    // The first time a teacher opens one for their subject+class we create
+    // their per-class quiz row for it, so scores/analysis work as before.
+    const [{ data: weeks }, { data: existing }] = await Promise.all([
+      supabase.from('quiz_weeks').select('*'),
+      supabase.from('quizzes').select('*')
+        .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label),
+    ])
+    const have = new Set((existing || []).map((q) => q.week_id).filter(Boolean))
+    const missing = (weeks || []).filter((w) => !have.has(w.id))
+    if (missing.length > 0) {
+      await supabase.from('quizzes').upsert(
+        missing.map((w) => ({
+          week_id: w.id, subject_id: assignment.subject_id, class_label: assignment.class_label,
+          title: w.title, quiz_date: w.quiz_date, max_score: w.max_score,
+          order_index: w.order_index, created_by: teacherId,
+        })),
+        { onConflict: 'week_id,subject_id,class_label', ignoreDuplicates: true }
+      )
+    }
     const { data } = await supabase
       .from('quizzes').select('*')
       .eq('subject_id', assignment.subject_id).eq('class_label', assignment.class_label)
@@ -4435,12 +4665,11 @@ function QuizEntryPanel({ assignment, teacherId }) {
             {quizzes.map((q) => <option key={q.id} value={q.id}>{q.title} — {new Date(q.quiz_date).toLocaleDateString()} (/{q.max_score})</option>)}
           </select>
         </label>
-        <button onClick={() => setShowNew(true)} style={secondaryBtn}>+ New Quiz</button>
       </div>
 
       {!selectedQuiz ? (
         <div style={{ textAlign: 'center', color: COLORS.muted, padding: 24, background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8 }}>
-          No quizzes yet for this subject/class — create one to start entering scores.
+          No quizzes yet — weekly quizzes are set up by the Dean or admin and will show up here.
         </div>
       ) : loading ? <p style={{ color: COLORS.muted }}>Loading...</p> : (
         <>
@@ -4504,13 +4733,6 @@ function QuizEntryPanel({ assignment, teacherId }) {
         </>
       )}
 
-      {showNew && (
-        <NewQuizModal
-          assignment={assignment} teacherId={teacherId}
-          onClose={() => setShowNew(false)}
-          onCreated={(id) => { setShowNew(false); loadQuizzes(); setSelectedQuizId(id) }}
-        />
-      )}
     </>
   )
 }
@@ -4572,7 +4794,8 @@ function QuizAnalysisPanel({ assignment }) {
     return { label: q.title, value: pcts.length > 0 ? Math.round((pcts.reduce((a, b) => a + b, 0) / pcts.length) * 10) / 10 : null }
   }).filter((t) => t.value !== null)
 
-  const latestQuiz = quizzes.length > 0 ? quizzes[quizzes.length - 1] : null
+  const quizzesWithScores = quizzes.filter((q) => students.some((s) => scoresIndex[`${q.id}:${s.id}`]))
+  const latestQuiz = quizzesWithScores.length > 0 ? quizzesWithScores[quizzesWithScores.length - 1] : null
   const latestScores = latestQuiz
     ? students
         .map((s) => ({ student: s, entry: scoresIndex[`${latestQuiz.id}:${s.id}`] }))
@@ -4685,7 +4908,7 @@ function QuizzesScreen({ teacherId }) {
     <>
       <h2>Weekly Quizzes</h2>
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 16 }}>
-        Quick, informal quizzes tracked separately from full exams — for trend analysis only, they don't count toward the term aggregate or report cards.
+        Weekly quizzes are set by the Dean or admin — pick one and enter your scores. They're tracked separately from full exams, for trend analysis only, and don't count toward the term aggregate or report cards.
       </p>
       <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
         <button onClick={() => setView('entry')} style={view === 'entry' ? btn : secondaryBtn}>Enter Scores</button>
@@ -7464,14 +7687,14 @@ function TimetableScreen() {
       supabase.from('timetable_periods').select('*').order('order_index'),
       supabase.from('timetable_slots').select('*, subjects(name), profiles(full_name)').order('day_of_week'),
       supabase.from('subjects').select('*').order('name'),
-      supabase.from('profiles').select('id, full_name, role').eq('status', 'approved').order('full_name'),
-      supabase.from('teacher_assignments').select('*, subjects(name), profiles(full_name)'),
+      supabase.from('profiles').select('id, full_name, role, title').eq('status', 'approved').order('full_name'),
+      supabase.from('teacher_assignments').select('*, subjects(name), profiles(full_name, role, title)'),
     ])
     setPeriods(periodData || [])
     setSlots(slotData || [])
     setSubjects(subjectData || [])
-    setTeachers(teacherData || [])
-    setAssignments(assignData || [])
+    setTeachers((teacherData || []).filter(isTimetableStaff))
+    setAssignments((assignData || []).filter((a) => !isSchoolAdminAccount(a.profiles)))
     setLoading(false)
   }
 
@@ -7939,10 +8162,10 @@ function TimetableGenerator({ periods, existingSlots, onDone }) {
     setLoadingAssignments(true)
     supabase
       .from('teacher_assignments')
-      .select('*, subjects(name), profiles(full_name)')
+      .select('*, subjects(name), profiles(full_name, role, title)')
       .eq('status', 'approved')
       .then(({ data }) => {
-        const approved = data || []
+        const approved = (data || []).filter((a) => !isSchoolAdminAccount(a.profiles))
         setAssignments(approved)
         setPerWeek(Object.fromEntries(approved.map((a) => [`${a.teacher_id}-${a.subject_id}-${a.class_label}`, 3])))
         setLoadingAssignments(false)
@@ -8692,21 +8915,61 @@ function SettingsScreen() {
   )
 }
 
+// ============================================================================
+// EXPIRY GUARD — locks the whole app after EXPIRES_AT (Kenya time).
+// Change the date below to extend or shorten the trial. Uses the server's
+// clock when available so changing a phone's date doesn't bypass it.
+// ============================================================================
+const EXPIRES_AT = new Date('2026-09-21T20:30:00+03:00').getTime()
+
+function ExpiryGuard({ children }) {
+  const [expired, setExpired] = useState(false)
+
+  useEffect(() => {
+    async function check() {
+      let now = Date.now()
+      try {
+        const res = await fetch(window.location.origin, { method: 'HEAD', cache: 'no-store' })
+        const serverDate = res.headers.get('date')
+        if (serverDate) now = new Date(serverDate).getTime()
+      } catch {}
+      setExpired(now >= EXPIRES_AT)
+    }
+    check()
+    const id = setInterval(check, 60000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (expired) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', fontFamily: 'sans-serif' }}>
+        <div>
+          <h2>Trial period ended</h2>
+          <p style={{ color: '#666' }}>This demo is no longer available. Please contact the administrator.</p>
+        </div>
+      </div>
+    )
+  }
+  return children
+}
+
 export default function App() {
   return (
-    <GateScreen>
-      <NotificationProvider>
-        <SchoolSettingsProvider>
-          <GradeScaleProvider>
-            <CbcScaleProvider>
-              <ConcurrentGroupsProvider>
-                <AppContent />
-              </ConcurrentGroupsProvider>
-            </CbcScaleProvider>
-          </GradeScaleProvider>
-        </SchoolSettingsProvider>
-      </NotificationProvider>
-    </GateScreen>
+    <ExpiryGuard>
+      <GateScreen>
+        <NotificationProvider>
+          <SchoolSettingsProvider>
+            <GradeScaleProvider>
+              <CbcScaleProvider>
+                <ConcurrentGroupsProvider>
+                  <AppContent />
+                </ConcurrentGroupsProvider>
+              </CbcScaleProvider>
+            </GradeScaleProvider>
+          </SchoolSettingsProvider>
+        </NotificationProvider>
+      </GateScreen>
+    </ExpiryGuard>
   )
 }
 
@@ -8762,6 +9025,7 @@ function AppContent() {
             {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
             {tab === 'Students' && <StudentsScreen />}
             {tab === 'Exams' && <ExamsScreen />}
+            {tab === 'Quizzes' && <QuizWeeksScreen />}
             {tab === 'Reports' && <ReportsScreen />}
             {tab === 'Performance Track' && <PerformanceTrackScreen />}
             {tab === 'Attendance' && <AdminAttendanceScreen profile={profile} />}
