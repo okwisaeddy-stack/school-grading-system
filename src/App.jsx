@@ -8862,7 +8862,7 @@ function BrandingSettings() {
   )
 }
 
-function SettingsScreen() {
+function SettingsScreen({ profile }) {
   const { scale: kcseScale, loading: kcseLoading, reload: reloadKcse } = useGradeScale()
   const { scale: cbcScale, loading: cbcLoading, reload: reloadCbc } = useCbcScale()
 
@@ -8872,6 +8872,13 @@ function SettingsScreen() {
       <p style={{ color: COLORS.muted, fontSize: 13, marginBottom: 20 }}>
         Customize the grading scales used across the school. Each cohort's scale is independent, so changing one does not affect the other.
       </p>
+
+      {isSchoolAdminAccount(profile) && (
+        <>
+          <TrialControlPanel />
+          <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, margin: '28px 0' }} />
+        </>
+      )}
 
       <BrandingSettings />
       <div style={{ borderTop: `1px solid ${COLORS.ruleLight}`, margin: '28px 0' }} />
@@ -8916,41 +8923,156 @@ function SettingsScreen() {
 }
 
 // ============================================================================
-// EXPIRY GUARD — locks the whole app after EXPIRES_AT (Kenya time).
-// Change the date below to extend or shorten the trial. Uses the server's
-// clock when available so changing a phone's date doesn't bypass it.
+// TRIAL CONTROL — a manual on/off switch controlled from the school-admin
+// account (Settings → Trial control): deactivate now, or after a set number
+// of days. When it is off, everyone else sees "Trial period ended". State
+// lives in the `trial_control` table (see trial_control.sql). If the table can't be read, the app stays on rather
+// than locking everyone out by mistake.
 // ============================================================================
-const EXPIRES_AT = new Date('2026-09-21T20:30:00+03:00').getTime()
+const TrialContext = createContext({ expired: false, state: null, reload: () => {} })
+function useTrial() { return useContext(TrialContext) }
+
+function TrialEndedScreen({ onLogout }) {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', fontFamily: 'sans-serif', background: COLORS.paper }}>
+      <div>
+        <h2>Trial period ended</h2>
+        <p style={{ color: COLORS.muted, fontSize: 14 }}>This demo is no longer available. Please contact the administrator.</p>
+        {onLogout && <button onClick={onLogout} style={{ ...secondaryBtn, marginTop: 16 }}>Log out</button>}
+      </div>
+    </div>
+  )
+}
 
 function ExpiryGuard({ children }) {
+  const [state, setState] = useState(null)
   const [expired, setExpired] = useState(false)
+  const [ready, setReady] = useState(false)
+  // Hidden way back in for the school admin: open the site with ?admin=1 once
+  // (this device then remembers it). Nothing on the lock screen hints at it.
+  const [adminEntry] = useState(() => {
+    try {
+      if (new URLSearchParams(window.location.search).get('admin') === '1') {
+        localStorage.setItem('trial_admin_device', '1')
+        return true
+      }
+      return localStorage.getItem('trial_admin_device') === '1'
+    } catch { return false }
+  })
+
+  const check = useCallback(async () => {
+    try {
+      const { data, error } = await supabase.from('trial_control').select('shut_off, expires_at').eq('id', 1).maybeSingle()
+      if (error || !data) { setState(null); setExpired(false) }
+      else {
+        let now = Date.now()
+        try {
+          // Prefer the server's clock so changing a phone's date can't bypass the deadline
+          const res = await fetch(window.location.origin, { method: 'HEAD', cache: 'no-store' })
+          const serverDate = res.headers.get('date')
+          if (serverDate) now = new Date(serverDate).getTime()
+        } catch {}
+        const past = !!data.expires_at && now >= new Date(data.expires_at).getTime()
+        setState(data)
+        setExpired(!!data.shut_off || past)
+      }
+    } catch {
+      setExpired(false)
+    }
+    setReady(true)
+  }, [])
 
   useEffect(() => {
-    async function check() {
-      let now = Date.now()
-      try {
-        const res = await fetch(window.location.origin, { method: 'HEAD', cache: 'no-store' })
-        const serverDate = res.headers.get('date')
-        if (serverDate) now = new Date(serverDate).getTime()
-      } catch {}
-      setExpired(now >= EXPIRES_AT)
-    }
     check()
     const id = setInterval(check, 60000)
     return () => clearInterval(id)
-  }, [])
+  }, [check])
 
-  if (expired) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', fontFamily: 'sans-serif' }}>
-        <div>
-          <h2>Trial period ended</h2>
-          <p style={{ color: '#666' }}>This demo is no longer available. Please contact the administrator.</p>
-        </div>
-      </div>
-    )
+  if (!ready) return null
+  if (expired && !adminEntry) return <TrialEndedScreen />
+  return <TrialContext.Provider value={{ expired, state, reload: check }}>{children}</TrialContext.Provider>
+}
+
+// Settings panel — only rendered for the school-admin account.
+function TrialControlPanel() {
+  const { notify, confirmAction } = useNotify()
+  const { state, expired, reload } = useTrial()
+  const [days, setDays] = useState('7')
+  const [saving, setSaving] = useState(false)
+
+  async function update(patch, msg) {
+    setSaving(true)
+    const { data, error } = await supabase
+      .from('trial_control').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', 1).select()
+    setSaving(false)
+    if (error) { notify(`Couldn't update: ${error.message}`, 'error'); return }
+    if (!data || data.length === 0) { notify("Couldn't update — the trial_control table is missing or this account isn't allowed to change it.", 'error'); return }
+    notify(msg)
+    reload()
   }
-  return children
+
+  async function deactivateNow() {
+    const ok = await confirmAction(
+      'Deactivate the app now? Everyone except this account will see "Trial period ended".',
+      { danger: true, confirmLabel: 'Deactivate' }
+    )
+    if (ok) update({ shut_off: true }, 'App deactivated.')
+  }
+
+  async function scheduleDeactivation(n) {
+    const count = Number(n)
+    if (!count || count <= 0) { notify('Enter a number of days.', 'error'); return }
+    const when = new Date(Date.now() + count * 86400000)
+    update({ shut_off: false, expires_at: when.toISOString() }, `Will deactivate in ${count} day${count === 1 ? '' : 's'} (${when.toLocaleString()}).`)
+  }
+
+  async function reactivate() {
+    update({ shut_off: false, expires_at: null }, 'App is active again.')
+  }
+
+  const expiresAt = state?.expires_at ? new Date(state.expires_at) : null
+  const daysLeft = expiresAt ? Math.max(0, Math.ceil((expiresAt.getTime() - Date.now()) / 86400000)) : null
+
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.ruleLight}`, borderRadius: 8, padding: 16 }}>
+      <div style={sectionLabel}>Trial control (visible only to this account)</div>
+      {!state ? (
+        <p style={{ fontSize: 13, color: COLORS.muted }}>Not set up yet — run trial_control.sql in the Supabase SQL editor, then reload.</p>
+      ) : (
+        <>
+          <p style={{ fontSize: 13, fontWeight: 700, color: expired ? COLORS.warn : COLORS.good, marginBottom: 12 }}>
+            {expired
+              ? 'Deactivated — everyone else sees "Trial period ended".'
+              : expiresAt
+                ? `Active — deactivates automatically on ${expiresAt.toLocaleString()} (${daysLeft} day${daysLeft === 1 ? '' : 's'} left).`
+                : 'Active — no deactivation scheduled.'}
+          </p>
+
+          {expired ? (
+            <button onClick={reactivate} disabled={saving} style={btn}>Reactivate</button>
+          ) : (
+            <>
+              <button onClick={deactivateNow} disabled={saving} style={{ ...secondaryBtn, color: COLORS.warn, borderColor: COLORS.warn, marginBottom: 14 }}>
+                Deactivate now
+              </button>
+
+              <div style={{ fontSize: 12, color: COLORS.muted, marginBottom: 6 }}>Or deactivate automatically after:</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 10 }}>
+                <button onClick={() => scheduleDeactivation(7)} disabled={saving} style={secondaryBtn}>1 week</button>
+                <label style={fieldLabel}>Custom days
+                  <input type="number" min={1} value={days} onChange={(e) => setDays(e.target.value)} style={{ ...input, width: 90 }} />
+                </label>
+                <button onClick={() => scheduleDeactivation(days)} disabled={saving} style={btn}>Schedule</button>
+                {expiresAt && (
+                  <button onClick={() => update({ expires_at: null }, 'Scheduled deactivation cancelled.')} disabled={saving} style={secondaryBtn}>Cancel schedule</button>
+                )}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  )
 }
 
 export default function App() {
@@ -8980,6 +9102,7 @@ function AppContent() {
   const [loadingProfile, setLoadingProfile] = useState(false)
   const [tab, setTab] = useState('Dashboard')
   const isNarrow = useIsNarrow()
+  const trial = useTrial()
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -9010,6 +9133,10 @@ function AppContent() {
     return <div style={wrap}><p>Loading...</p></div>
   }
 
+  if (session && profile && trial.expired && !isSchoolAdminAccount(profile)) {
+    return <TrialEndedScreen onLogout={handleLogout} />
+  }
+
   if (session && profile) {
     if ((profile.role === 'teacher' || profile.role === 'finance') && profile.status !== 'approved') {
       return <PendingApproval fullName={profile.full_name} onLogout={handleLogout} />
@@ -9022,6 +9149,11 @@ function AppContent() {
         <div style={{ background: COLORS.paper, minHeight: '100vh', display: 'flex', flexDirection: isNarrow ? 'column' : 'row' }}>
           <TopBar tab={tab} setTab={setTab} onLogout={handleLogout} fullName={profile.full_name} title={profile.title} />
           <div style={{ flex: 1, minWidth: 0 }}>
+            {trial.expired && (
+              <div style={{ background: COLORS.warn, color: '#fff', fontSize: 12, padding: '8px 16px', textAlign: 'center' }}>
+                The app is deactivated — everyone else sees &quot;Trial period ended&quot;. Reactivate it under Settings → Trial control.
+              </div>
+            )}
             {tab === 'Dashboard' && <DashboardScreen onNavigate={setTab} />}
             {tab === 'Students' && <StudentsScreen />}
             {tab === 'Exams' && <ExamsScreen />}
@@ -9036,7 +9168,7 @@ function AppContent() {
             {tab === 'Finance' && FINANCE_VISIBLE_TITLES.includes(profile.title) && <AdminFinanceScreen profile={profile} />}
             {tab === 'My Teaching' && <AdminTeachingScreen profile={profile} />}
             {tab === 'Approvals' && <ApprovalsScreen currentUserId={profile.id} viewerTitle={profile.title} />}
-            {tab === 'Settings' && <SettingsScreen />}
+            {tab === 'Settings' && <SettingsScreen profile={profile} />}
           </div>
         </div>
       )
